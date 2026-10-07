@@ -2,7 +2,7 @@
 
 A standalone ambient photo display for Ubuntu, inspired by ChromeOS and Google Ambient Mode. The goal is a calm, varied presentation of personal photos that appears when the desktop is idle and disappears when the user returns. It is built in Rust with `wgpu` and `winit`, with Wayland compatibility as a priority.
 
-The current version is the visual first milestone: it runs when launched, reads images recursively from local directories, shuffles without repeating within a cycle, and preloads images on a worker thread. The default presentation is a continuous rightward strip of solo, stacked, and mosaic photo groups with small gaps between them. Portrait and landscape images are fitted or cropped according to the layout.
+The current version is the visual first milestone: it runs when launched, reads images recursively from local directories, shuffles without repeating within a cycle, and preloads images on a worker thread. The default presentation is a continuous rightward strip with small gaps between photo groups. It varies solo, stacked, paired portrait, mosaic, three-photo row, and four-photo grid layouts in shuffled order. Every group shares the same top and bottom edges; full-height cards match each other, while stacked cards use two aligned rows. Portrait and landscape images are fitted or cropped according to the layout.
 
 ## Build and run
 
@@ -14,13 +14,13 @@ cargo run --release -- /path/to/photos
 
 You can provide multiple directories. The app supports JPEG, PNG, WebP, GIF, BMP, and TIFF images and applies EXIF orientation when present. It starts fullscreen and hides the pointer. Press a key, click, scroll, or move the mouse to leave the display.
 
-For a resizable preview or to change the scroll speed:
+For a resizable preview with a custom scroll speed:
 
 ```sh
-cargo run --release -- --windowed --duration 32 /path/to/photos
+cargo run --release -- --windowed --scroll-speed 1 /path/to/photos
 ```
 
-The default scroll speed is one screen width every 32 seconds. `--duration` changes that number of seconds; larger values scroll more slowly. The strip pauses only if enough photos have not yet loaded to fill the incoming edge.
+The default scroll speed is **1.25 screen widths per minute** (one screen width every 48 seconds). `--scroll-speed` sets screen widths per minute: smaller numbers scroll more slowly, and larger numbers scroll faster. For example, `--scroll-speed 1` takes one minute per screen width. The existing `--duration 60` option gives that same speed; use one speed option at a time. The strip pauses only if enough photos have not yet loaded to fill the incoming edge.
 
 To use the original fading and sliding presentation:
 

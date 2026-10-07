@@ -1,6 +1,7 @@
 mod photos;
 
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
+use rand::seq::SliceRandom;
 use std::{
     collections::VecDeque,
     env,
@@ -39,9 +40,23 @@ fn parse_style(value: &str) -> Result<Style, String> {
 
 fn default_duration(style: Style) -> Duration {
     match style {
-        Style::Scroll => Duration::from_secs(32),
+        Style::Scroll => Duration::from_secs(48),
         Style::Slides => Duration::from_secs(8),
     }
+}
+
+fn parse_scroll_speed(value: &str) -> Result<Duration, String> {
+    let screens_per_minute: f64 = value
+        .parse()
+        .map_err(|_| format!("invalid scroll speed: {value}"))?;
+    if !screens_per_minute.is_finite() || screens_per_minute <= 0.0 {
+        return Err("--scroll-speed must be a positive number".into());
+    }
+    let seconds_per_screen = 60.0 / screens_per_minute;
+    if !(0.01..=86_400.0).contains(&seconds_per_screen) {
+        return Err("--scroll-speed is outside the supported range".into());
+    }
+    Ok(Duration::from_secs_f64(seconds_per_screen))
 }
 
 struct Settings {
@@ -87,6 +102,7 @@ fn background_clear_color(rgb: [u8; 3], srgb_surface: bool) -> wgpu::Color {
 fn settings() -> Result<Settings, String> {
     let mut args = env::args().skip(1);
     let mut duration_given = false;
+    let mut scroll_speed = None;
     let mut settings = Settings {
         directories: Vec::new(),
         duration: default_duration(Style::Scroll),
@@ -98,13 +114,17 @@ fn settings() -> Result<Settings, String> {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Usage: ambient-screensaver [--windowed] [--style scroll|slides] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
+                println!("Usage: ambient-screensaver [--windowed] [--style scroll|slides] [--scroll-speed SCREENS_PER_MINUTE] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
                 std::process::exit(0);
             }
             "--windowed" => settings.windowed = true,
             "--style" => {
                 let value = args.next().ok_or("--style needs scroll or slides")?;
                 settings.style = parse_style(&value)?;
+            }
+            "--scroll-speed" => {
+                let value = args.next().ok_or("--scroll-speed needs a number")?;
+                scroll_speed = Some(parse_scroll_speed(&value)?);
             }
             "--background-color" => {
                 let value = args.next().ok_or("--background-color needs a hex color")?;
@@ -134,7 +154,15 @@ fn settings() -> Result<Settings, String> {
     if settings.directories.is_empty() {
         return Err("provide at least one photo directory; see --help".into());
     }
-    if !duration_given {
+    if let Some(speed_duration) = scroll_speed {
+        if settings.style != Style::Scroll {
+            return Err("--scroll-speed is only available with --style scroll".into());
+        }
+        if duration_given {
+            return Err("use either --scroll-speed or --duration, not both".into());
+        }
+        settings.duration = speed_duration;
+    } else if !duration_given {
         settings.duration = default_duration(settings.style);
     }
     Ok(settings)
@@ -250,13 +278,81 @@ fn scroll_group_lefts(head_x: f32, groups: &[ScrollGroup], gap: f32) -> Vec<f32>
         .collect()
 }
 
+struct ScrollRows {
+    top: f32,
+    full: f32,
+    half: f32,
+    bottom: f32,
+}
+
+impl ScrollRows {
+    fn new(height: f32) -> Self {
+        let top = height * 0.07;
+        let full = height * 0.86;
+        let gap = height * 0.03;
+        let half = (full - gap) / 2.0;
+        Self {
+            top,
+            full,
+            half,
+            bottom: top + half + gap,
+        }
+    }
+}
+
 fn portrait_card_size(width: f32, height: f32) -> (f32, f32) {
-    let card_height = height * 0.86;
+    let card_height = ScrollRows::new(height).full;
     let card_width = (card_height * 2.0 / 3.0).clamp(width * 0.32, width * 0.84);
     (card_width, card_height)
 }
 
+const SCROLL_PATTERN_COUNT: usize = 8;
+
+fn scroll_pattern_photo_count(pattern: usize) -> usize {
+    match pattern {
+        0 => 1,
+        1 | 3 | 4 => 2,
+        2 | 5 | 7 => 3,
+        6 => 4,
+        _ => unreachable!("invalid scroll pattern"),
+    }
+}
+
+struct LayoutBag {
+    available: Vec<usize>,
+    remaining: Vec<usize>,
+    last: Option<usize>,
+}
+
+impl LayoutBag {
+    fn new(photo_count: usize) -> Self {
+        let available = (0..SCROLL_PATTERN_COUNT)
+            .filter(|&pattern| scroll_pattern_photo_count(pattern) <= photo_count)
+            .collect();
+        Self {
+            available,
+            remaining: Vec::new(),
+            last: None,
+        }
+    }
+
+    fn next(&mut self) -> usize {
+        if self.remaining.is_empty() {
+            self.remaining = self.available.clone();
+            self.remaining.shuffle(&mut rand::thread_rng());
+            if self.remaining.len() > 1 && self.remaining.last() == self.last.as_ref() {
+                let last = self.remaining.len() - 1;
+                self.remaining.swap(last, 0);
+            }
+        }
+        let pattern = self.remaining.pop().expect("at least one scroll pattern");
+        self.last = Some(pattern);
+        pattern
+    }
+}
+
 fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f32, Vec<[f32; 4]>) {
+    let rows = ScrollRows::new(height);
     match mode {
         0 => {
             let (portrait_width, card_height) = portrait_card_size(width, height);
@@ -265,18 +361,15 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
             } else {
                 (card_height * first_aspect).clamp(width * 0.32, width * 0.84)
             };
-            (
-                card_width,
-                vec![[0.0, (height - card_height) / 2.0, card_width, card_height]],
-            )
+            (card_width, vec![[0.0, rows.top, card_width, card_height]])
         }
         1 => {
             let group_width = width * 0.46;
             (
                 group_width,
                 vec![
-                    [0.0, height * 0.07, group_width, height * 0.415],
-                    [0.0, height * 0.515, group_width, height * 0.415],
+                    [0.0, rows.top, group_width, rows.half],
+                    [0.0, rows.bottom, group_width, rows.half],
                 ],
             )
         }
@@ -287,9 +380,68 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
             (
                 right_x + right_width,
                 vec![
-                    [0.0, height * 0.07, left_width, card_height],
-                    [right_x, height * 0.07, right_width, height * 0.415],
-                    [right_x, height * 0.515, right_width, height * 0.415],
+                    [0.0, rows.top, left_width, card_height],
+                    [right_x, rows.top, right_width, rows.half],
+                    [right_x, rows.bottom, right_width, rows.half],
+                ],
+            )
+        }
+        3 => {
+            let (card_width, card_height) = portrait_card_size(width, height);
+            let second_x = card_width + width * 0.02;
+            (
+                second_x + card_width,
+                vec![
+                    [0.0, rows.top, card_width, card_height],
+                    [second_x, rows.top, card_width, card_height],
+                ],
+            )
+        }
+        4 => {
+            let group_width = width * 0.62;
+            (
+                group_width,
+                vec![
+                    [0.0, rows.top, group_width, rows.half],
+                    [0.0, rows.bottom, group_width, rows.half],
+                ],
+            )
+        }
+        5 => {
+            let (card_width, card_height) = portrait_card_size(width, height);
+            let step = card_width + width * 0.018;
+            (
+                step * 2.0 + card_width,
+                vec![
+                    [0.0, rows.top, card_width, card_height],
+                    [step, rows.top, card_width, card_height],
+                    [step * 2.0, rows.top, card_width, card_height],
+                ],
+            )
+        }
+        6 => {
+            let card_width = width * 0.34;
+            let second_x = card_width + width * 0.02;
+            (
+                second_x + card_width,
+                vec![
+                    [0.0, rows.top, card_width, rows.half],
+                    [second_x, rows.top, card_width, rows.half],
+                    [0.0, rows.bottom, card_width, rows.half],
+                    [second_x, rows.bottom, card_width, rows.half],
+                ],
+            )
+        }
+        7 => {
+            let (portrait_width, portrait_height) = portrait_card_size(width, height);
+            let stack_width = width * 0.33;
+            let tall_x = stack_width + width * 0.02;
+            (
+                tall_x + portrait_width,
+                vec![
+                    [0.0, rows.top, stack_width, rows.half],
+                    [0.0, rows.bottom, stack_width, rows.half],
+                    [tall_x, rows.top, portrait_width, portrait_height],
                 ],
             )
         }
@@ -352,6 +504,8 @@ struct Renderer {
     style: Style,
     scroll_head_x: Option<f32>,
     scroll_last_tick: Instant,
+    scroll_patterns: VecDeque<usize>,
+    layout_bag: LayoutBag,
 }
 
 impl Renderer {
@@ -480,6 +634,8 @@ impl Renderer {
             style: settings.style,
             scroll_head_x: None,
             scroll_last_tick: Instant::now(),
+            scroll_patterns: VecDeque::new(),
+            layout_bag: LayoutBag::new(photo_count),
         })
     }
 
@@ -578,6 +734,9 @@ impl Renderer {
     }
 
     fn update_scroll(&mut self) {
+        while self.scroll_patterns.len() < 10 {
+            self.scroll_patterns.push_back(self.layout_bag.next());
+        }
         let now = Instant::now();
         let delta = now
             .duration_since(self.scroll_last_tick)
@@ -613,7 +772,8 @@ impl Renderer {
         let distance = (delta * width / self.duration.as_secs_f32()).min((-leftmost).max(0.0));
         let new_head_x = head_x + distance;
         if new_head_x >= width {
-            for _ in 0..layout_photo_count(layout_mode(self.slide_number, self.photo_count)) {
+            let current_pattern = self.scroll_patterns.pop_front().unwrap();
+            for _ in 0..scroll_pattern_photo_count(current_pattern) {
                 self.photos.pop_front();
             }
             self.slide_number += 1;
@@ -625,24 +785,21 @@ impl Renderer {
 
     fn scroll_groups(&self, width: f32, height: f32) -> Vec<ScrollGroup> {
         let mut first_photo = 0;
-        let mut group_number = self.slide_number;
         let mut groups = Vec::new();
-        while first_photo < self.photos.len() {
-            let mode = layout_mode(group_number, self.photo_count);
-            let count = layout_photo_count(mode);
+        for &pattern in &self.scroll_patterns {
+            let count = scroll_pattern_photo_count(pattern);
             if first_photo + count > self.photos.len() {
                 break;
             }
             let first = &self.photos[first_photo];
             let aspect = first.width as f32 / first.height as f32;
-            let (group_width, rects) = scroll_layout(mode, aspect, width, height);
+            let (group_width, rects) = scroll_layout(pattern, aspect, width, height);
             groups.push(ScrollGroup {
                 first_photo,
                 width: group_width,
                 rects,
             });
             first_photo += count;
-            group_number += 1;
         }
         groups
     }
@@ -904,14 +1061,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn scroll_layout_bag_uses_each_eligible_pattern_before_repeating() {
+        let mut bag = LayoutBag::new(4);
+        let mut previous = None;
+        for _ in 0..20 {
+            let cycle: Vec<_> = (0..SCROLL_PATTERN_COUNT).map(|_| bag.next()).collect();
+            assert_eq!(
+                cycle.iter().copied().collect::<HashSet<_>>().len(),
+                SCROLL_PATTERN_COUNT
+            );
+            if let Some(previous) = previous {
+                assert_ne!(cycle[0], previous);
+            }
+            previous = cycle.last().copied();
+        }
+        assert_eq!(LayoutBag::new(1).available, vec![0]);
+        assert!(!LayoutBag::new(3).available.contains(&6));
+    }
+
+    #[test]
+    fn every_scroll_pattern_has_valid_card_bounds() {
+        let width = 1280.0;
+        let height = 800.0;
+        let rows = ScrollRows::new(height);
+        let near = |a: f32, b: f32| (a - b).abs() < 0.001;
+        for pattern in 0..SCROLL_PATTERN_COUNT {
+            let (group_width, rects) = scroll_layout(pattern, 0.7, width, height);
+            assert_eq!(rects.len(), scroll_pattern_photo_count(pattern));
+            let mut lowest_edge = 0.0_f32;
+            for [x, y, w, h] in rects {
+                assert!(x >= 0.0 && y >= 0.0);
+                assert!(x + w <= group_width + 0.001);
+                assert!(y + h <= height + 0.001);
+                assert!(near(y, rows.top) || near(y, rows.bottom));
+                if near(h, rows.full) {
+                    assert!(near(y, rows.top));
+                } else {
+                    assert!(near(h, rows.half));
+                }
+                lowest_edge = lowest_edge.max(y + h);
+            }
+            assert!(near(lowest_edge, rows.top + rows.full));
+        }
+    }
 
     #[test]
     fn scroll_groups_use_small_gutters_and_preserve_positions() {
         assert_eq!(parse_style("scroll"), Ok(Style::Scroll));
         assert_eq!(parse_style("slides"), Ok(Style::Slides));
         assert!(parse_style("unknown").is_err());
-        assert_eq!(default_duration(Style::Scroll), Duration::from_secs(32));
+        assert_eq!(default_duration(Style::Scroll), Duration::from_secs(48));
         assert_eq!(default_duration(Style::Slides), Duration::from_secs(8));
+        assert_eq!(parse_scroll_speed("1.25"), Ok(Duration::from_secs(48)));
+        assert_eq!(parse_scroll_speed("1"), Ok(Duration::from_secs(60)));
+        assert!(parse_scroll_speed("0").is_err());
+        assert!(parse_scroll_speed("invalid").is_err());
         let (solo_width, solo_rects) = scroll_layout(0, 0.7, 1280.0, 800.0);
         let (pair_width, pair_rects) = scroll_layout(1, 1.0, 1280.0, 800.0);
         let (mosaic_width, mosaic_rects) = scroll_layout(2, 1.0, 1280.0, 800.0);
