@@ -4,6 +4,8 @@ A standalone ambient photo display for Ubuntu, inspired by ChromeOS and Google A
 
 The current version is the visual first milestone: it runs when launched, reads images recursively from local directories, shuffles without repeating within a cycle, and preloads images on a worker thread. The default presentation is a continuous rightward strip with small gaps between photo groups. It varies solo, stacked, paired portrait, mosaic, three-photo row, and four-photo grid layouts in shuffled order. Every group shares the same top and bottom edges; full-height cards match each other, while stacked cards use two aligned rows. Portrait and landscape images are fitted or cropped according to the layout.
 
+The first complete photo scene fades in over 1.5 seconds after loading. The clock stays visible while photos load.
+
 ## Build and run
 
 Install a Rust toolchain, then run:

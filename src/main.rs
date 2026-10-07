@@ -47,6 +47,13 @@ fn default_duration(style: Style) -> Duration {
     }
 }
 
+const STARTUP_FADE: Duration = Duration::from_millis(1500);
+
+fn startup_opacity(elapsed: Duration) -> f32 {
+    let progress = (elapsed.as_secs_f32() / STARTUP_FADE.as_secs_f32()).clamp(0.0, 1.0);
+    progress * progress * (3.0 - 2.0 * progress)
+}
+
 fn parse_scroll_speed(value: &str) -> Result<Duration, String> {
     let screens_per_minute: f64 = value
         .parse()
@@ -503,6 +510,7 @@ struct Renderer {
     photos: VecDeque<Photo>,
     receiver: mpsc::Receiver<DecodedPhoto>,
     slide_started: Instant,
+    startup_fade_started: Option<Instant>,
     transition_started: Option<Instant>,
     duration: Duration,
     transition: Duration,
@@ -638,6 +646,7 @@ impl Renderer {
             photos: VecDeque::new(),
             receiver,
             slide_started: Instant::now(),
+            startup_fade_started: None,
             transition_started: None,
             duration: settings.duration,
             transition: settings.transition,
@@ -741,6 +750,13 @@ impl Renderer {
         match self.style {
             Style::Scroll => self.update_scroll(),
             Style::Slides => self.update_slides(),
+        }
+        let first_scene_ready = match self.style {
+            Style::Scroll => self.scroll_head_x.is_some(),
+            Style::Slides => self.photos.len() >= layout_photo_count(0),
+        };
+        if first_scene_ready && self.startup_fade_started.is_none() {
+            self.startup_fade_started = Some(Instant::now());
         }
         true
     }
@@ -925,6 +941,13 @@ impl Renderer {
             Style::Scroll => self.scroll_cards(width, height),
             Style::Slides => self.slides_cards(width, height),
         };
+        let startup_alpha = self
+            .startup_fade_started
+            .map(|started| startup_opacity(started.elapsed()))
+            .unwrap_or(0.0);
+        for (_, _, alpha) in &mut cards {
+            *alpha *= startup_alpha;
+        }
         if let Some(photo) = &self.clock_photo {
             cards.push((photo, self.clock_rect, 1.0));
         }
@@ -1091,6 +1114,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn first_scene_fades_in_smoothly() {
+        assert_eq!(startup_opacity(Duration::ZERO), 0.0);
+        assert!((startup_opacity(STARTUP_FADE / 2) - 0.5).abs() < 0.001);
+        assert_eq!(startup_opacity(STARTUP_FADE), 1.0);
+        assert_eq!(startup_opacity(STARTUP_FADE * 2), 1.0);
+    }
 
     #[test]
     fn scroll_layout_bag_uses_each_eligible_pattern_before_repeating() {
