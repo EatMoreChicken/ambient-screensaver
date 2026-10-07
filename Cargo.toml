@@ -1,0 +1,15 @@
+[package]
+name = "ambient-screensaver"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bytemuck = { version = "1.16", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+pollster = "0.3"
+rand = "0.8"
+wgpu = "0.19"
+winit = "0.29"
+
+[profile.release]
+lto = "thin"
