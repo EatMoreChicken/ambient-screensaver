@@ -1,9 +1,10 @@
 mod photos;
 
+use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
 use std::{
     collections::VecDeque,
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{mpsc, Arc},
     time::{Duration, Instant},
 };
@@ -26,7 +27,39 @@ struct Settings {
     directories: Vec<PathBuf>,
     duration: Duration,
     transition: Duration,
+    background_color: [u8; 3],
     windowed: bool,
+}
+
+fn parse_background_color(value: &str) -> Result<[u8; 3], String> {
+    let hex = value.strip_prefix('#').unwrap_or(value);
+    if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("invalid background color: {value}; use #RRGGBB"));
+    }
+    Ok([
+        u8::from_str_radix(&hex[0..2], 16).unwrap(),
+        u8::from_str_radix(&hex[2..4], 16).unwrap(),
+        u8::from_str_radix(&hex[4..6], 16).unwrap(),
+    ])
+}
+
+fn background_clear_color(rgb: [u8; 3], srgb_surface: bool) -> wgpu::Color {
+    let channel = |value: u8| {
+        let value = f64::from(value) / 255.0;
+        if !srgb_surface {
+            value
+        } else if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    wgpu::Color {
+        r: channel(rgb[0]),
+        g: channel(rgb[1]),
+        b: channel(rgb[2]),
+        a: 1.0,
+    }
 }
 
 fn settings() -> Result<Settings, String> {
@@ -35,15 +68,20 @@ fn settings() -> Result<Settings, String> {
         directories: Vec::new(),
         duration: Duration::from_secs(8),
         transition: Duration::from_millis(1500),
+        background_color: [0xF5, 0xF0, 0xE6],
         windowed: false,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Usage: ambient-screensaver [--windowed] [--duration SECONDS] [--transition SECONDS] PHOTO_DIR [PHOTO_DIR ...]");
+                println!("Usage: ambient-screensaver [--windowed] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
                 std::process::exit(0);
             }
             "--windowed" => settings.windowed = true,
+            "--background-color" => {
+                let value = args.next().ok_or("--background-color needs a hex color")?;
+                settings.background_color = parse_background_color(&value)?;
+            }
             "--duration" | "--transition" => {
                 let value = args
                     .next()
@@ -76,6 +114,14 @@ struct DecodedPhoto {
     height: u32,
 }
 
+fn open_oriented(path: &Path) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    let mut decoder = ImageReader::open(path)?.into_decoder()?;
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut image = DynamicImage::from_decoder(decoder)?;
+    image.apply_orientation(orientation);
+    Ok(image)
+}
+
 fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
     let (sender, receiver) = mpsc::sync_channel(3);
     std::thread::spawn(move || {
@@ -83,7 +129,7 @@ fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
         let mut bag = photos::ShuffleBag::new(paths);
         let mut failures = 0;
         while let Some(path) = bag.next() {
-            match image::open(&path) {
+            match open_oriented(&path) {
                 Ok(image) => {
                     failures = 0;
                     let image = if image.width() > 2560 || image.height() > 2560 {
@@ -128,6 +174,7 @@ struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    background_color: wgpu::Color,
     pipeline: wgpu::RenderPipeline,
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
@@ -187,6 +234,7 @@ impl Renderer {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
+        let background_color = background_clear_color(settings.background_color, format.is_srgb());
         surface.configure(&device, &config);
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("photo bind layout"),
@@ -248,6 +296,7 @@ impl Renderer {
             device,
             queue,
             config,
+            background_color,
             pipeline,
             bind_layout,
             sampler,
@@ -451,12 +500,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.045,
-                            g: 0.052,
-                            b: 0.063,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(self.background_color),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -591,4 +635,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_background_hex_color() {
+        assert_eq!(parse_background_color("#F5F0E6"), Ok([245, 240, 230]));
+        assert_eq!(parse_background_color("80aBcD"), Ok([128, 171, 205]));
+        assert!(parse_background_color("#fff").is_err());
+        assert!(parse_background_color("#GG0000").is_err());
+    }
+
+    #[test]
+    fn clear_color_accounts_for_srgb_surface() {
+        let color = background_clear_color([128, 0, 255], true);
+        assert!((color.r - 0.21586).abs() < 0.0001);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 1.0);
+    }
+
+    #[test]
+    fn applies_jpeg_exif_orientation() {
+        let image = image::RgbImage::from_pixel(2, 1, image::Rgb([255, 0, 0]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&image)
+            .unwrap();
+        // APP1 Exif segment with orientation 8 (rotate 270 degrees clockwise).
+        let exif = [
+            0xff, 0xe1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0, 0, b'I', b'I', 42, 0, 8, 0, 0, 0, 1,
+            0, 0x12, 0x01, 3, 0, 1, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0, 0,
+        ];
+        let mut oriented_jpeg = jpeg[..2].to_vec();
+        oriented_jpeg.extend_from_slice(&exif);
+        oriented_jpeg.extend_from_slice(&jpeg[2..]);
+        let path = std::env::temp_dir().join(format!(
+            "ambient-orientation-{}-{}.jpg",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, oriented_jpeg).unwrap();
+        let result = open_oriented(&path);
+        std::fs::remove_file(&path).unwrap();
+        let image = result.unwrap();
+        assert_eq!((image.width(), image.height()), (1, 2));
+    }
 }

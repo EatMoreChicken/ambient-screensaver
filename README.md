@@ -12,7 +12,7 @@ Install a Rust toolchain, then run:
 cargo run --release -- /path/to/photos
 ```
 
-You can provide multiple directories. The app supports JPEG, PNG, WebP, GIF, BMP, and TIFF images. It starts fullscreen and hides the pointer. Press a key, click, scroll, or move the mouse to leave the display.
+You can provide multiple directories. The app supports JPEG, PNG, WebP, GIF, BMP, and TIFF images and applies EXIF orientation when present. It starts fullscreen and hides the pointer. Press a key, click, scroll, or move the mouse to leave the display.
 
 For a resizable preview:
 
@@ -21,6 +21,12 @@ cargo run --release -- --windowed --duration 8 --transition 1.5 /path/to/photos
 ```
 
 `--duration` controls how long a layout stays on screen before its transition begins; `--transition` controls the transition length. Both values are in seconds.
+
+The mat behind and between photos defaults to cream white (`#F5F0E6`). Set a different color with a six-digit hex code:
+
+```sh
+cargo run --release -- --background-color '#DCE8E0' /path/to/photos
+```
 
 ## Direction and roadmap
 
