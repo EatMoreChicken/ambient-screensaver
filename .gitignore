@@ -1,2 +1,4 @@
 /target/
 /photos/
+__pycache__/
+*.pyc
