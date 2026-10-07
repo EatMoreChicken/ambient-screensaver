@@ -23,11 +23,33 @@ struct Vertex {
     alpha: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Style {
+    Scroll,
+    Slides,
+}
+
+fn parse_style(value: &str) -> Result<Style, String> {
+    match value {
+        "scroll" => Ok(Style::Scroll),
+        "slides" => Ok(Style::Slides),
+        _ => Err(format!("invalid style: {value}; use scroll or slides")),
+    }
+}
+
+fn default_duration(style: Style) -> Duration {
+    match style {
+        Style::Scroll => Duration::from_secs(32),
+        Style::Slides => Duration::from_secs(8),
+    }
+}
+
 struct Settings {
     directories: Vec<PathBuf>,
     duration: Duration,
     transition: Duration,
     background_color: [u8; 3],
+    style: Style,
     windowed: bool,
 }
 
@@ -64,20 +86,26 @@ fn background_clear_color(rgb: [u8; 3], srgb_surface: bool) -> wgpu::Color {
 
 fn settings() -> Result<Settings, String> {
     let mut args = env::args().skip(1);
+    let mut duration_given = false;
     let mut settings = Settings {
         directories: Vec::new(),
-        duration: Duration::from_secs(8),
+        duration: default_duration(Style::Scroll),
         transition: Duration::from_millis(1500),
         background_color: [0xF5, 0xF0, 0xE6],
+        style: Style::Scroll,
         windowed: false,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Usage: ambient-screensaver [--windowed] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
+                println!("Usage: ambient-screensaver [--windowed] [--style scroll|slides] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
                 std::process::exit(0);
             }
             "--windowed" => settings.windowed = true,
+            "--style" => {
+                let value = args.next().ok_or("--style needs scroll or slides")?;
+                settings.style = parse_style(&value)?;
+            }
             "--background-color" => {
                 let value = args.next().ok_or("--background-color needs a hex color")?;
                 settings.background_color = parse_background_color(&value)?;
@@ -94,6 +122,7 @@ fn settings() -> Result<Settings, String> {
                 }
                 if arg == "--duration" {
                     settings.duration = Duration::from_secs_f64(seconds);
+                    duration_given = true;
                 } else {
                     settings.transition = Duration::from_secs_f64(seconds);
                 }
@@ -104,6 +133,9 @@ fn settings() -> Result<Settings, String> {
     }
     if settings.directories.is_empty() {
         return Err("provide at least one photo directory; see --help".into());
+    }
+    if !duration_given {
+        settings.duration = default_duration(settings.style);
     }
     Ok(settings)
 }
@@ -198,6 +230,73 @@ fn layout_rects(mode: usize, width: f32, height: f32) -> Vec<[f32; 4]> {
     }
 }
 
+struct ScrollGroup {
+    first_photo: usize,
+    width: f32,
+    rects: Vec<[f32; 4]>,
+}
+
+fn scroll_group_lefts(head_x: f32, groups: &[ScrollGroup], gap: f32) -> Vec<f32> {
+    let mut x = head_x;
+    groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| {
+            if index > 0 {
+                x -= gap + group.width;
+            }
+            x
+        })
+        .collect()
+}
+
+fn portrait_card_size(width: f32, height: f32) -> (f32, f32) {
+    let card_height = height * 0.86;
+    let card_width = (card_height * 2.0 / 3.0).clamp(width * 0.32, width * 0.84);
+    (card_width, card_height)
+}
+
+fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f32, Vec<[f32; 4]>) {
+    match mode {
+        0 => {
+            let (portrait_width, card_height) = portrait_card_size(width, height);
+            let card_width = if first_aspect < 1.0 {
+                portrait_width
+            } else {
+                (card_height * first_aspect).clamp(width * 0.32, width * 0.84)
+            };
+            (
+                card_width,
+                vec![[0.0, (height - card_height) / 2.0, card_width, card_height]],
+            )
+        }
+        1 => {
+            let group_width = width * 0.46;
+            (
+                group_width,
+                vec![
+                    [0.0, height * 0.07, group_width, height * 0.415],
+                    [0.0, height * 0.515, group_width, height * 0.415],
+                ],
+            )
+        }
+        2 => {
+            let (left_width, card_height) = portrait_card_size(width, height);
+            let right_x = left_width + width * 0.02;
+            let right_width = width * 0.33;
+            (
+                right_x + right_width,
+                vec![
+                    [0.0, height * 0.07, left_width, card_height],
+                    [right_x, height * 0.07, right_width, height * 0.415],
+                    [right_x, height * 0.515, right_width, height * 0.415],
+                ],
+            )
+        }
+        _ => unreachable!("invalid scroll layout mode"),
+    }
+}
+
 struct SceneMotion {
     alpha: f32,
     shift_x: f32,
@@ -250,6 +349,9 @@ struct Renderer {
     transition: Duration,
     slide_number: u64,
     photo_count: usize,
+    style: Style,
+    scroll_head_x: Option<f32>,
+    scroll_last_tick: Instant,
 }
 
 impl Renderer {
@@ -353,7 +455,7 @@ impl Renderer {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card vertices"),
-            size: (6 * 6 * std::mem::size_of::<Vertex>()) as u64,
+            size: (6 * 10 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -375,6 +477,9 @@ impl Renderer {
             transition: settings.transition,
             slide_number: 0,
             photo_count,
+            style: settings.style,
+            scroll_head_x: None,
+            scroll_last_tick: Instant::now(),
         })
     }
 
@@ -440,13 +545,20 @@ impl Renderer {
         if size.width == 0 || size.height == 0 {
             return;
         }
+        self.scroll_head_x = self
+            .scroll_head_x
+            .map(|x| x * size.width as f32 / self.config.width as f32);
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.device, &self.config);
     }
 
     fn update(&mut self) -> bool {
-        while self.photos.len() < 4 {
+        let photo_limit = match self.style {
+            Style::Scroll => 10,
+            Style::Slides => 4,
+        };
+        while self.photos.len() < photo_limit {
             match self.receiver.try_recv() {
                 Ok(decoded) => {
                     if self.photos.is_empty() {
@@ -458,6 +570,84 @@ impl Renderer {
                 Err(mpsc::TryRecvError::Disconnected) => return !self.photos.is_empty(),
             }
         }
+        match self.style {
+            Style::Scroll => self.update_scroll(),
+            Style::Slides => self.update_slides(),
+        }
+        true
+    }
+
+    fn update_scroll(&mut self) {
+        let now = Instant::now();
+        let delta = now
+            .duration_since(self.scroll_last_tick)
+            .as_secs_f32()
+            .min(0.1);
+        self.scroll_last_tick = now;
+        let width = self.config.width as f32;
+        let groups = self.scroll_groups(width, self.config.height as f32);
+        if groups.len() < 2 {
+            return;
+        }
+        let gap = width * 0.018;
+        let head_x = match self.scroll_head_x {
+            Some(x) => x,
+            None => {
+                let x = width - groups[0].width;
+                if scroll_group_lefts(x, &groups, gap)
+                    .last()
+                    .copied()
+                    .unwrap_or(width)
+                    > 0.0
+                {
+                    return;
+                }
+                self.scroll_head_x = Some(x);
+                x
+            }
+        };
+        let leftmost = scroll_group_lefts(head_x, &groups, gap)
+            .last()
+            .copied()
+            .unwrap_or(0.0);
+        let distance = (delta * width / self.duration.as_secs_f32()).min((-leftmost).max(0.0));
+        let new_head_x = head_x + distance;
+        if new_head_x >= width {
+            for _ in 0..layout_photo_count(layout_mode(self.slide_number, self.photo_count)) {
+                self.photos.pop_front();
+            }
+            self.slide_number += 1;
+            self.scroll_head_x = Some(new_head_x - gap - groups[1].width);
+        } else {
+            self.scroll_head_x = Some(new_head_x);
+        }
+    }
+
+    fn scroll_groups(&self, width: f32, height: f32) -> Vec<ScrollGroup> {
+        let mut first_photo = 0;
+        let mut group_number = self.slide_number;
+        let mut groups = Vec::new();
+        while first_photo < self.photos.len() {
+            let mode = layout_mode(group_number, self.photo_count);
+            let count = layout_photo_count(mode);
+            if first_photo + count > self.photos.len() {
+                break;
+            }
+            let first = &self.photos[first_photo];
+            let aspect = first.width as f32 / first.height as f32;
+            let (group_width, rects) = scroll_layout(mode, aspect, width, height);
+            groups.push(ScrollGroup {
+                first_photo,
+                width: group_width,
+                rects,
+            });
+            first_photo += count;
+            group_number += 1;
+        }
+        groups
+    }
+
+    fn update_slides(&mut self) {
         if self.transition_started.is_none()
             && self.slide_started.elapsed() >= self.duration
             && next_layout_ready(self.slide_number, self.photo_count, self.photos.len())
@@ -472,17 +662,28 @@ impl Renderer {
                 self.slide_number += 1;
             }
         }
-        true
     }
 
-    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let frame = self.surface.get_current_texture()?;
-        let view = frame.texture.create_view(&Default::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("ambient frame"),
-            });
+    fn scroll_cards(&self, width: f32, height: f32) -> Vec<(&Photo, [f32; 4], f32)> {
+        let Some(head_x) = self.scroll_head_x else {
+            return Vec::new();
+        };
+        let groups = self.scroll_groups(width, height);
+        let lefts = scroll_group_lefts(head_x, &groups, width * 0.018);
+        let mut cards = Vec::new();
+        for (group, left) in groups.iter().zip(lefts) {
+            for (slot, local_rect) in group.rects.iter().enumerate() {
+                let mut rect = *local_rect;
+                rect[0] += left;
+                if rect[0] + rect[2] > 0.0 && rect[0] < width {
+                    cards.push((&self.photos[group.first_photo + slot], rect, 1.0));
+                }
+            }
+        }
+        cards
+    }
+
+    fn slides_cards(&self, width: f32, height: f32) -> Vec<(&Photo, [f32; 4], f32)> {
         let elapsed = self.slide_started.elapsed();
         let progress = self
             .transition_started
@@ -491,8 +692,6 @@ impl Renderer {
             })
             .unwrap_or(0.0);
         let eased = progress * progress * (3.0 - 2.0 * progress);
-        let width = self.config.width as f32;
-        let height = self.config.height as f32;
         let mode = layout_mode(self.slide_number, self.photo_count);
         let drift = (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0);
         let mut cards = if self.photos.len() >= layout_photo_count(mode) {
@@ -526,6 +725,23 @@ impl Renderer {
                 },
             ));
         }
+        cards
+    }
+
+    fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let frame = self.surface.get_current_texture()?;
+        let view = frame.texture.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("ambient frame"),
+            });
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let cards = match self.style {
+            Style::Scroll => self.scroll_cards(width, height),
+            Style::Slides => self.slides_cards(width, height),
+        };
         let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
         for (index, (photo, rect, alpha)) in cards.iter().enumerate() {
             let vertices = card_vertices(rect, *alpha, photo, width, height);
@@ -688,6 +904,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_groups_use_small_gutters_and_preserve_positions() {
+        assert_eq!(parse_style("scroll"), Ok(Style::Scroll));
+        assert_eq!(parse_style("slides"), Ok(Style::Slides));
+        assert!(parse_style("unknown").is_err());
+        assert_eq!(default_duration(Style::Scroll), Duration::from_secs(32));
+        assert_eq!(default_duration(Style::Slides), Duration::from_secs(8));
+        let (solo_width, solo_rects) = scroll_layout(0, 0.7, 1280.0, 800.0);
+        let (pair_width, pair_rects) = scroll_layout(1, 1.0, 1280.0, 800.0);
+        let (mosaic_width, mosaic_rects) = scroll_layout(2, 1.0, 1280.0, 800.0);
+        let (_, narrow_portrait_rects) = scroll_layout(0, 0.55, 1280.0, 800.0);
+        assert_eq!(solo_rects[0], mosaic_rects[0]);
+        assert_eq!(solo_rects[0], narrow_portrait_rects[0]);
+        assert_eq!(solo_rects[0][1], pair_rects[0][1]);
+        assert_eq!(
+            solo_rects[0][1] + solo_rects[0][3],
+            pair_rects[1][1] + pair_rects[1][3]
+        );
+        assert_eq!(
+            (solo_rects.len(), pair_rects.len(), mosaic_rects.len()),
+            (1, 2, 3)
+        );
+        let groups = [
+            ScrollGroup {
+                first_photo: 0,
+                width: solo_width,
+                rects: solo_rects,
+            },
+            ScrollGroup {
+                first_photo: 1,
+                width: pair_width,
+                rects: pair_rects,
+            },
+            ScrollGroup {
+                first_photo: 3,
+                width: mosaic_width,
+                rects: mosaic_rects,
+            },
+        ];
+        let gap = 20.0;
+        let before = scroll_group_lefts(1280.0, &groups, gap);
+        assert!((before[1] + pair_width + gap - before[0]).abs() < 0.001);
+        let after = scroll_group_lefts(before[1], &groups[1..], gap);
+        assert_eq!(after[0], before[1]);
+    }
 
     #[test]
     fn transition_waits_for_the_complete_incoming_layout() {

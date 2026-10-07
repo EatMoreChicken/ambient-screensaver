@@ -2,7 +2,7 @@
 
 A standalone ambient photo display for Ubuntu, inspired by ChromeOS and Google Ambient Mode. The goal is a calm, varied presentation of personal photos that appears when the desktop is idle and disappears when the user returns. It is built in Rust with `wgpu` and `winit`, with Wayland compatibility as a priority.
 
-The current version is the visual first milestone: it runs when launched, reads images recursively from local directories, shuffles without repeating within a cycle, preloads images on a worker thread, and renders solo and multi-photo layouts with gentle movement, fades, and sliding transitions. Portrait and landscape images are fitted or cropped according to the layout.
+The current version is the visual first milestone: it runs when launched, reads images recursively from local directories, shuffles without repeating within a cycle, and preloads images on a worker thread. The default presentation is a continuous rightward strip of solo, stacked, and mosaic photo groups with small gaps between them. Portrait and landscape images are fitted or cropped according to the layout.
 
 ## Build and run
 
@@ -14,13 +14,21 @@ cargo run --release -- /path/to/photos
 
 You can provide multiple directories. The app supports JPEG, PNG, WebP, GIF, BMP, and TIFF images and applies EXIF orientation when present. It starts fullscreen and hides the pointer. Press a key, click, scroll, or move the mouse to leave the display.
 
-For a resizable preview:
+For a resizable preview or to change the scroll speed:
 
 ```sh
-cargo run --release -- --windowed --duration 8 --transition 1.5 /path/to/photos
+cargo run --release -- --windowed --duration 32 /path/to/photos
 ```
 
-`--duration` controls how long a layout stays on screen before its transition begins; `--transition` controls the transition length. Both values are in seconds.
+The default scroll speed is one screen width every 32 seconds. `--duration` changes that number of seconds; larger values scroll more slowly. The strip pauses only if enough photos have not yet loaded to fill the incoming edge.
+
+To use the original fading and sliding presentation:
+
+```sh
+cargo run --release -- --style slides --duration 8 --transition 1.5 /path/to/photos
+```
+
+With `--style slides`, `--duration` is the time a layout stays on screen before its transition, and `--transition` is the transition length. Both values are in seconds.
 
 The mat behind and between photos defaults to cream white (`#F5F0E6`). Set a different color with a six-digit hex code:
 
