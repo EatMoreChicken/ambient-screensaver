@@ -169,6 +169,69 @@ struct Photo {
     _texture: wgpu::Texture,
 }
 
+fn layout_mode(slide_number: u64, photo_count: usize) -> usize {
+    (slide_number % photo_count.clamp(1, 3) as u64) as usize
+}
+
+fn layout_photo_count(mode: usize) -> usize {
+    mode + 1
+}
+
+fn next_layout_ready(slide_number: u64, photo_count: usize, loaded_count: usize) -> bool {
+    let next_mode = layout_mode(slide_number + 1, photo_count);
+    photo_count > 1 && loaded_count > layout_photo_count(next_mode)
+}
+
+fn layout_rects(mode: usize, width: f32, height: f32) -> Vec<[f32; 4]> {
+    match mode {
+        0 => vec![[width * 0.035, height * 0.04, width * 0.93, height * 0.92]],
+        1 => vec![
+            [width * 0.045, height * 0.08, width * 0.47, height * 0.84],
+            [width * 0.535, height * 0.08, width * 0.42, height * 0.84],
+        ],
+        2 => vec![
+            [width * 0.04, height * 0.06, width * 0.57, height * 0.88],
+            [width * 0.64, height * 0.06, width * 0.32, height * 0.42],
+            [width * 0.64, height * 0.52, width * 0.32, height * 0.42],
+        ],
+        _ => unreachable!("invalid layout mode"),
+    }
+}
+
+struct SceneMotion {
+    alpha: f32,
+    shift_x: f32,
+    drift: f32,
+}
+
+fn scene_cards(
+    photos: &VecDeque<Photo>,
+    first: usize,
+    mode: usize,
+    width: f32,
+    height: f32,
+    motion: SceneMotion,
+) -> Vec<(&Photo, [f32; 4], f32)> {
+    layout_rects(mode, width, height)
+        .into_iter()
+        .enumerate()
+        .map(|(slot, bounds)| {
+            let photo = &photos[first + slot];
+            let mut rect = if mode == 0 {
+                fitted_rect(photo, bounds)
+            } else {
+                bounds
+            };
+            rect[0] += motion.shift_x;
+            if mode == 0 {
+                rect[0] += width * 0.012 * motion.drift;
+                rect[1] -= height * 0.008 * motion.drift;
+            }
+            (photo, rect, motion.alpha)
+        })
+        .collect()
+}
+
 struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -182,9 +245,11 @@ struct Renderer {
     photos: VecDeque<Photo>,
     receiver: mpsc::Receiver<DecodedPhoto>,
     slide_started: Instant,
+    transition_started: Option<Instant>,
     duration: Duration,
     transition: Duration,
     slide_number: u64,
+    photo_count: usize,
 }
 
 impl Renderer {
@@ -192,6 +257,7 @@ impl Renderer {
         window: Arc<Window>,
         receiver: mpsc::Receiver<DecodedPhoto>,
         settings: &Settings,
+        photo_count: usize,
     ) -> Result<Self, String> {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
@@ -287,7 +353,7 @@ impl Renderer {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card vertices"),
-            size: (6 * 4 * std::mem::size_of::<Vertex>()) as u64,
+            size: (6 * 6 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -304,9 +370,11 @@ impl Renderer {
             photos: VecDeque::new(),
             receiver,
             slide_started: Instant::now(),
+            transition_started: None,
             duration: settings.duration,
             transition: settings.transition,
             slide_number: 0,
+            photo_count,
         })
     }
 
@@ -378,18 +446,31 @@ impl Renderer {
     }
 
     fn update(&mut self) -> bool {
-        while self.photos.len() < 3 {
+        while self.photos.len() < 4 {
             match self.receiver.try_recv() {
-                Ok(decoded) => self.photos.push_back(self.upload(decoded)),
+                Ok(decoded) => {
+                    if self.photos.is_empty() {
+                        self.slide_started = Instant::now();
+                    }
+                    self.photos.push_back(self.upload(decoded));
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return !self.photos.is_empty(),
             }
         }
-        if self.photos.len() > 1 && self.slide_started.elapsed() >= self.duration + self.transition
+        if self.transition_started.is_none()
+            && self.slide_started.elapsed() >= self.duration
+            && next_layout_ready(self.slide_number, self.photo_count, self.photos.len())
         {
-            self.photos.pop_front();
-            self.slide_started = Instant::now();
-            self.slide_number += 1;
+            self.transition_started = Some(Instant::now());
+        }
+        if let Some(started) = self.transition_started {
+            if started.elapsed() >= self.transition {
+                self.photos.pop_front();
+                self.slide_started = Instant::now();
+                self.transition_started = None;
+                self.slide_number += 1;
+            }
         }
         true
     }
@@ -402,87 +483,48 @@ impl Renderer {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("ambient frame"),
             });
-        let mut cards: Vec<(&Photo, [f32; 4], f32)> = Vec::new();
         let elapsed = self.slide_started.elapsed();
-        let progress = if self.photos.len() > 1 {
-            ((elapsed.as_secs_f32() - self.duration.as_secs_f32()) / self.transition.as_secs_f32())
-                .clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
+        let progress = self
+            .transition_started
+            .map(|started| {
+                (started.elapsed().as_secs_f32() / self.transition.as_secs_f32()).clamp(0.0, 1.0)
+            })
+            .unwrap_or(0.0);
         let eased = progress * progress * (3.0 - 2.0 * progress);
         let width = self.config.width as f32;
         let height = self.config.height as f32;
-        let mode = self.slide_number % 3;
-        if let Some(photo) = self.photos.front() {
-            let rect = if mode == 1 && self.photos.len() >= 2 {
-                [
-                    width * 0.045 - eased * width * 0.08,
-                    height * 0.08,
-                    width * 0.47,
-                    height * 0.84,
-                ]
-            } else if mode == 2 && self.photos.len() >= 3 {
-                [
-                    width * 0.04 - eased * width * 0.08,
-                    height * 0.06,
-                    width * 0.57,
-                    height * 0.88,
-                ]
-            } else {
-                let mut rect = fitted_rect(
-                    photo,
-                    [
-                        width * 0.035 - eased * width * 0.08,
-                        height * 0.04,
-                        width * 0.93,
-                        height * 0.92,
-                    ],
-                );
-                let drift = (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0);
-                rect[0] += width * 0.012 * drift;
-                rect[1] -= height * 0.008 * drift;
-                rect
-            };
-            cards.push((photo, rect, 1.0 - eased));
-        }
-        if let Some(photo) = self.photos.get(1) {
-            if mode == 1 {
-                cards.push((
-                    photo,
-                    [width * 0.535, height * 0.08, width * 0.42, height * 0.84],
-                    1.0 - eased,
-                ));
-            } else if mode == 2 && self.photos.len() >= 3 {
-                cards.push((
-                    photo,
-                    [width * 0.64, height * 0.06, width * 0.32, height * 0.42],
-                    1.0 - eased,
-                ));
-            }
-        }
-        if mode == 2 {
-            if let Some(photo) = self.photos.get(2) {
-                cards.push((
-                    photo,
-                    [width * 0.64, height * 0.52, width * 0.32, height * 0.42],
-                    1.0 - eased,
-                ));
-            }
-        }
+        let mode = layout_mode(self.slide_number, self.photo_count);
+        let drift = (elapsed.as_secs_f32() / self.duration.as_secs_f32()).clamp(0.0, 1.0);
+        let mut cards = if self.photos.len() >= layout_photo_count(mode) {
+            scene_cards(
+                &self.photos,
+                0,
+                mode,
+                width,
+                height,
+                SceneMotion {
+                    alpha: 1.0 - eased,
+                    shift_x: -width * 0.08 * eased,
+                    drift,
+                },
+            )
+        } else {
+            Vec::new()
+        };
         if progress > 0.0 {
-            if let Some(photo) = self.photos.get(1) {
-                let rect = fitted_rect(
-                    photo,
-                    [
-                        width * (0.115 - eased * 0.08),
-                        height * 0.04,
-                        width * 0.93,
-                        height * 0.92,
-                    ],
-                );
-                cards.push((photo, rect, eased));
-            }
+            let next_mode = layout_mode(self.slide_number + 1, self.photo_count);
+            cards.extend(scene_cards(
+                &self.photos,
+                1,
+                next_mode,
+                width,
+                height,
+                SceneMotion {
+                    alpha: eased,
+                    shift_x: width * 0.08 * (1.0 - eased),
+                    drift: 0.0,
+                },
+            ));
         }
         let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
         for (index, (photo, rect, alpha)) in cards.iter().enumerate() {
@@ -580,6 +622,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("no supported photos found in the supplied directories".into());
     }
     eprintln!("Found {} photos", paths.len());
+    let photo_count = paths.len();
     let receiver = start_loader(paths);
     let event_loop = EventLoop::new()?;
     let mut builder = WindowBuilder::new()
@@ -590,7 +633,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let window = Arc::new(builder.build(&event_loop)?);
     window.set_cursor_visible(false);
-    let mut renderer = pollster::block_on(Renderer::new(window.clone(), receiver, &settings))?;
+    let mut renderer = pollster::block_on(Renderer::new(
+        window.clone(),
+        receiver,
+        &settings,
+        photo_count,
+    ))?;
     let mut last_cursor_position: Option<(f64, f64)> = None;
     event_loop.run(move |event, event_loop| {
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -640,6 +688,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_waits_for_the_complete_incoming_layout() {
+        assert_eq!(layout_mode(0, 10), 0);
+        assert_eq!(layout_mode(1, 10), 1);
+        assert_eq!(layout_mode(2, 10), 2);
+        assert!(!next_layout_ready(0, 10, 2));
+        assert!(next_layout_ready(0, 10, 3));
+        assert!(!next_layout_ready(1, 10, 3));
+        assert!(next_layout_ready(1, 10, 4));
+        assert!(!next_layout_ready(0, 1, 4));
+        assert_eq!(layout_rects(2, 1280.0, 800.0).len(), 3);
+    }
 
     #[test]
     fn parses_background_hex_color() {
