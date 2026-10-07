@@ -1,5 +1,7 @@
+mod clock;
 mod photos;
 
+use chrono::Local;
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
 use rand::seq::SliceRandom;
 use std::{
@@ -493,6 +495,11 @@ struct Renderer {
     bind_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     vertices: wgpu::Buffer,
+    clock: clock::Clock,
+    clock_photo: Option<Photo>,
+    clock_rect: [f32; 4],
+    clock_key: String,
+    clock_screen_size: (u32, u32),
     photos: VecDeque<Photo>,
     receiver: mpsc::Receiver<DecodedPhoto>,
     slide_started: Instant,
@@ -609,7 +616,7 @@ impl Renderer {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card vertices"),
-            size: (6 * 10 * std::mem::size_of::<Vertex>()) as u64,
+            size: (6 * 11 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -623,6 +630,11 @@ impl Renderer {
             bind_layout,
             sampler,
             vertices,
+            clock: clock::Clock::new()?,
+            clock_photo: None,
+            clock_rect: [0.0; 4],
+            clock_key: String::new(),
+            clock_screen_size: (0, 0),
             photos: VecDeque::new(),
             receiver,
             slide_started: Instant::now(),
@@ -886,6 +898,20 @@ impl Renderer {
     }
 
     fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
+        let now = Local::now();
+        let clock_key = now.format("%Y-%m-%d %H:%M").to_string();
+        let screen_size = (self.config.width, self.config.height);
+        if self.clock_key != clock_key || self.clock_screen_size != screen_size {
+            let image = self.clock.draw(&now, screen_size);
+            self.clock_rect = image.rect;
+            self.clock_photo = Some(self.upload(DecodedPhoto {
+                pixels: image.pixels,
+                width: image.width,
+                height: image.height,
+            }));
+            self.clock_key = clock_key;
+            self.clock_screen_size = screen_size;
+        }
         let frame = self.surface.get_current_texture()?;
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self
@@ -895,10 +921,13 @@ impl Renderer {
             });
         let width = self.config.width as f32;
         let height = self.config.height as f32;
-        let cards = match self.style {
+        let mut cards = match self.style {
             Style::Scroll => self.scroll_cards(width, height),
             Style::Slides => self.slides_cards(width, height),
         };
+        if let Some(photo) = &self.clock_photo {
+            cards.push((photo, self.clock_rect, 1.0));
+        }
         let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
         for (index, (photo, rect, alpha)) in cards.iter().enumerate() {
             let vertices = card_vertices(rect, *alpha, photo, width, height);

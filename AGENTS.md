@@ -1,7 +1,8 @@
 # Repository notes for agents
 
 - This is a Rust 2021 application for an Ubuntu ambient photo display. Read `README.md` for the product goal, current behavior, and roadmap.
-- `src/main.rs` owns CLI parsing, asynchronous image loading, the `wgpu` renderer, layouts, and the `winit` event loop. `src/photos.rs` handles recursive discovery and shuffle order. `src/shader.wgsl` is the photo shader.
+- `src/main.rs` owns CLI parsing, asynchronous image loading, the `wgpu` renderer, layouts, and the `winit` event loop. `src/photos.rs` handles recursive discovery and shuffle order. `src/clock.rs` renders the local day, date, and time into a transparent texture using a system font. `src/shader.wgsl` draws photos and the clock text.
+- The clock is one centered line in the bottom mat, drawn after the photos. Keep at least four percent of screen height clear at the bottom of each layout. Regenerate its texture when the local minute or window size changes; keep the vertex buffer large enough for ten photos plus the clock.
 - Apply image orientation metadata before resizing or uploading photos. Many camera JPEGs store landscape pixels with an EXIF rotation tag.
 - A slide transition needs every photo in the incoming layout preloaded. Draw that complete layout during the fade, and start the fade timer only when it is ready, so layouts do not snap into place afterward.
 - The default `scroll` style uses variable-width photo groups in one continuous rightward strip, separated by small gutters. The default speed is one screen width per 48 seconds; `--scroll-speed` sets screen widths per minute. `--style slides` keeps the older eight-second fade and slide timing. Keep enough groups loaded to cover the incoming edge, and preserve exact group positions when the rightmost group leaves the screen.

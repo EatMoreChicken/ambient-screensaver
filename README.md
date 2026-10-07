@@ -36,13 +36,15 @@ The mat behind and between photos defaults to cream white (`#F5F0E6`). Set a dif
 cargo run --release -- --background-color '#DCE8E0' /path/to/photos
 ```
 
+A small, centered line in the bottom mat shows the weekday, full date, and local time in dark grey. It updates each minute and uses the system's DejaVu Sans or Liberation Sans font.
+
 ## Direction and roadmap
 
 Keep photo discovery, layout decisions, GPU rendering, and idle integration separate. The visual experience should stay independent of any particular screensaver or desktop mechanism. Prefer Wayland-compatible Ubuntu/GNOME integration; XScreenSaver could be added later as an optional launcher, but is not the core architecture.
 
 The next milestone is configurable idle activation and stopping the display when the user returns. A simple config file could then cover photo directories, idle timeout, photo duration, transition speed, layout choices, shuffle behavior, background style, and multi-monitor behavior.
 
-Visual improvements to explore include more varied mosaics, gentle pan and zoom, rounded cards and soft shadows, and blurred or photo-colored backgrounds. Longer-term possibilities include photo metadata, face-aware cropping, coordinated multi-monitor layouts, clock or weather overlays, and sources such as Google Photos exports, Syncthing folders, Immich, or Nextcloud.
+Visual improvements to explore include more varied mosaics, gentle pan and zoom, rounded photo cards and soft shadows, and blurred or photo-colored backgrounds. Longer-term possibilities include photo metadata, face-aware cropping, coordinated multi-monitor layouts, weather overlays, and sources such as Google Photos exports, Syncthing folders, Immich, or Nextcloud.
 
 Replacing the GNOME lock screen or handling authentication is outside the initial scope.
 

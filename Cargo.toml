@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 bytemuck = { version = "1.16", features = ["derive"] }
+chrono = "0.4"
+fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
 pollster = "0.3"
 rand = "0.8"
