@@ -41,16 +41,21 @@ impl Clock {
         Err("could not load a clock font; install DejaVu Sans or Liberation Sans".into())
     }
 
-    pub fn draw(&self, now: &DateTime<Local>, screen: (u32, u32)) -> ClockImage {
-        // Every layout keeps at least four percent of the screen clear at the bottom.
+    pub fn draw(
+        &self,
+        now: &DateTime<Local>,
+        screen: (u32, u32),
+        bottom_mat_fraction: f32,
+    ) -> ClockImage {
         let width = screen.0;
         let height = (screen.1 as f32 * 0.04).floor().max(1.0) as u32;
         let font_size = (screen.1 as f32 * 0.019)
             .min(screen.0 as f32 * 0.028)
             .min(height as f32 * 0.62);
+        let bottom_mat_height = screen.1 as f32 * bottom_mat_fraction;
         let rect = [
             0.0,
-            screen.1 as f32 - height as f32,
+            screen.1 as f32 - (bottom_mat_height + height as f32) / 2.0,
             width as f32,
             height as f32,
         ];
@@ -102,10 +107,12 @@ mod tests {
 
     #[test]
     fn clock_text_is_centered_in_a_transparent_bottom_strip() {
-        let image = Clock::new()
-            .unwrap()
-            .draw(&chrono::Local::now(), (1280, 800));
-        assert_eq!(image.rect, [0.0, 768.0, 1280.0, 32.0]);
+        let clock = Clock::new().unwrap();
+        let image = clock.draw(&chrono::Local::now(), (1280, 800), 0.07);
+        let slide_image = clock.draw(&chrono::Local::now(), (1280, 800), 0.04);
+        assert_eq!(image.rect, [0.0, 756.0, 1280.0, 32.0]);
+        assert_eq!(slide_image.rect, [0.0, 768.0, 1280.0, 32.0]);
+        assert_eq!(image.rect[1] + image.rect[3] / 2.0, 772.0);
         assert_eq!(image.pixels[3], 0);
         let ink_x: Vec<_> = (0..image.width)
             .filter(|&x| {

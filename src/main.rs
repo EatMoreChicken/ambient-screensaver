@@ -918,7 +918,11 @@ impl Renderer {
         let clock_key = now.format("%Y-%m-%d %H:%M").to_string();
         let screen_size = (self.config.width, self.config.height);
         if self.clock_key != clock_key || self.clock_screen_size != screen_size {
-            let image = self.clock.draw(&now, screen_size);
+            let bottom_mat_fraction = match self.style {
+                Style::Scroll => 0.07,
+                Style::Slides => 0.04,
+            };
+            let image = self.clock.draw(&now, screen_size, bottom_mat_fraction);
             self.clock_rect = image.rect;
             self.clock_photo = Some(self.upload(DecodedPhoto {
                 pixels: image.pixels,

@@ -2,7 +2,7 @@
 
 - This is a Rust 2021 application for an Ubuntu ambient photo display. Read `README.md` for the product goal, current behavior, and roadmap.
 - `src/main.rs` owns CLI parsing, asynchronous image loading, the `wgpu` renderer, layouts, and the `winit` event loop. `src/photos.rs` handles recursive discovery and shuffle order. `src/clock.rs` renders the local day, date, and time into a transparent texture using a system font. `src/shader.wgsl` draws photos and the clock text.
-- The clock is one centered line in the bottom mat, drawn after the photos. Keep at least four percent of screen height clear at the bottom of each layout. Regenerate its texture when the local minute or window size changes; keep the vertex buffer large enough for ten photos plus the clock.
+- The clock is one centered line in the bottom mat, drawn after the photos. The scroll mat is seven percent of screen height; the narrowest slide mat is four percent. Center the clock vertically within the active style's mat. Regenerate its texture when the local minute or window size changes; keep the vertex buffer large enough for ten photos plus the clock.
 - Apply image orientation metadata before resizing or uploading photos. Many camera JPEGs store landscape pixels with an EXIF rotation tag.
 - A slide transition needs every photo in the incoming layout preloaded. Draw that complete layout during the fade, and start the fade timer only when it is ready, so layouts do not snap into place afterward.
 - On startup, begin the 1.5-second photo fade only when the first scene is ready (a complete visible strip for `scroll`, or the first photo for `slides`). Apply this opacity to photos before adding the clock so the clock remains visible while photos load.
