@@ -59,7 +59,15 @@ To preview without waiting for idle:
 ~/.local/share/ambient-screensaver/bin/ambient-screensaver --windowed "$HOME/Pictures"
 ```
 
-From the repository, use `cargo run --release -- --windowed "$HOME/Pictures"` instead. The default is a continuous rightward scroll at 1.25 screen widths per minute. Use `--scroll-speed 1` to slow it to one screen width per minute, `--background-color '#DCE8E0'` to change the cream mat, or `--style slides --duration 8 --transition 1.5` for the earlier slide layout. These display options currently work only for direct launches; GNOME setup saves photo folders and idle time.
+While developing, run from the repository so Cargo builds your current changes before launching:
+
+```sh
+cargo run -- --windowed photos
+```
+
+The local `photos/` folder is gitignored test data; replace it with any photo folder. Development builds use faster photo downscaling so previews start sooner. Use `cargo run --release -- --windowed photos` to test the higher-quality release scaling. The executable under `~/.local/share/ambient-screensaver/bin/` is a separate installed copy and does not update when you edit or build the source.
+
+The default is a continuous rightward scroll at 1.25 screen widths per minute. Use `--scroll-speed 1` to slow it to one screen width per minute, `--background-color '#DCE8E0'` to change the cream mat, or `--style slides --duration 8 --transition 1.5` for the earlier slide layout. These display options currently work only for direct launches; GNOME setup saves photo folders and idle time.
 
 The app reads JPEG, PNG, WebP, GIF, BMP, and TIFF files recursively and corrects photo orientation. Videos are not supported. Fullscreen mode closes on keyboard, mouse, or pointer activity.
 

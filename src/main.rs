@@ -4,7 +4,7 @@ mod photos;
 
 use chrono::Local;
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
-use rand::seq::SliceRandom;
+use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::VecDeque,
     env,
@@ -25,6 +25,48 @@ struct Vertex {
     position: [f32; 2],
     uv: [f32; 2],
     alpha: f32,
+    card_uv: [f32; 2],
+    arch_height: f32,
+    card_aspect: f32,
+    mask_bits: f32,
+}
+
+fn is_vertical_card(rect: &[f32; 4]) -> bool {
+    rect[3] > rect[2]
+}
+
+const TOP_LEFT: u8 = 1;
+const TOP_RIGHT: u8 = 2;
+const BOTTOM_RIGHT: u8 = 4;
+const BOTTOM_LEFT: u8 = 8;
+const ROUNDED_CORNERS: u8 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum PhotoMask {
+    None,
+    Arch,
+    Slash(u8),
+    Rounded,
+}
+
+fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
+    match rng.gen_range(0..24) {
+        0..=3 => PhotoMask::Arch,
+        4 => PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT),
+        5 => PhotoMask::Slash(TOP_RIGHT | BOTTOM_LEFT),
+        6 => PhotoMask::Slash(1 << rng.gen_range(0..4)),
+        7 => PhotoMask::Slash(TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT),
+        8 | 9 => PhotoMask::Rounded,
+        _ => PhotoMask::None,
+    }
+}
+
+fn visible_mask(mask: PhotoMask, rect: &[f32; 4]) -> PhotoMask {
+    if mask == PhotoMask::Arch && !is_vertical_card(rect) {
+        PhotoMask::None
+    } else {
+        mask
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,7 +246,12 @@ fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
                 Ok(image) => {
                     failures = 0;
                     let image = if image.width() > 2560 || image.height() > 2560 {
-                        image.resize(2560, 2560, image::imageops::FilterType::Lanczos3)
+                        // Keep large-photo previews responsive in unoptimized builds.
+                        if cfg!(debug_assertions) {
+                            image.thumbnail(2560, 2560)
+                        } else {
+                            image.resize(2560, 2560, image::imageops::FilterType::Lanczos3)
+                        }
                     } else {
                         image
                     }
@@ -236,6 +283,7 @@ fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
 struct Photo {
     width: u32,
     height: u32,
+    mask: PhotoMask,
     bind_group: wgpu::BindGroup,
     _texture: wgpu::Texture,
 }
@@ -616,7 +664,7 @@ impl Renderer {
             vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2, 4 => Float32, 5 => Float32, 6 => Float32],
             }] },
             fragment: Some(wgpu::FragmentState { module: &shader, entry_point: "fs_main", targets: &[Some(wgpu::ColorTargetState {
                 format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL,
@@ -662,7 +710,7 @@ impl Renderer {
         })
     }
 
-    fn upload(&self, decoded: DecodedPhoto) -> Photo {
+    fn upload(&self, decoded: DecodedPhoto, mask: PhotoMask) -> Photo {
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("photo"),
             size: wgpu::Extent3d {
@@ -715,6 +763,7 @@ impl Renderer {
         Photo {
             width: decoded.width,
             height: decoded.height,
+            mask,
             bind_group,
             _texture: texture,
         }
@@ -743,7 +792,12 @@ impl Renderer {
                     if self.photos.is_empty() {
                         self.slide_started = Instant::now();
                     }
-                    self.photos.push_back(self.upload(decoded));
+                    let mask = if self.style == Style::Scroll {
+                        random_photo_mask(&mut rand::thread_rng())
+                    } else {
+                        PhotoMask::None
+                    };
+                    self.photos.push_back(self.upload(decoded, mask));
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return !self.photos.is_empty(),
@@ -758,6 +812,7 @@ impl Renderer {
             Style::Slides => self.photos.len() >= layout_photo_count(0),
         };
         if first_scene_ready && self.startup_fade_started.is_none() {
+            eprintln!("Photo display ready");
             self.startup_fade_started = Some(Instant::now());
         }
         true
@@ -926,11 +981,14 @@ impl Renderer {
             };
             let image = self.clock.draw(&now, screen_size, bottom_mat_fraction);
             self.clock_rect = image.rect;
-            self.clock_photo = Some(self.upload(DecodedPhoto {
-                pixels: image.pixels,
-                width: image.width,
-                height: image.height,
-            }));
+            self.clock_photo = Some(self.upload(
+                DecodedPhoto {
+                    pixels: image.pixels,
+                    width: image.width,
+                    height: image.height,
+                },
+                PhotoMask::None,
+            ));
             self.clock_key = clock_key;
             self.clock_screen_size = screen_size;
         }
@@ -959,7 +1017,12 @@ impl Renderer {
         }
         let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
         for (index, (photo, rect, alpha)) in cards.iter().enumerate() {
-            let vertices = card_vertices(rect, *alpha, photo, width, height);
+            let mask = if self.style == Style::Scroll {
+                visible_mask(photo.mask, rect)
+            } else {
+                PhotoMask::None
+            };
+            let vertices = card_vertices(rect, *alpha, mask, photo, width, height);
             self.queue.write_buffer(
                 &self.vertices,
                 index as u64 * stride,
@@ -1013,6 +1076,7 @@ fn fitted_rect(photo: &Photo, bounds: [f32; 4]) -> [f32; 4] {
 fn card_vertices(
     rect: &[f32; 4],
     alpha: f32,
+    mask: PhotoMask,
     photo: &Photo,
     screen_w: f32,
     screen_h: f32,
@@ -1024,6 +1088,12 @@ fn card_vertices(
     let y1 = 1.0 - (y + h) / screen_h * 2.0;
     let image_aspect = photo.width as f32 / photo.height as f32;
     let box_aspect = w / h;
+    let (arch_height, mask_bits) = match mask {
+        PhotoMask::None => (0.0, 0.0),
+        PhotoMask::Arch => (w / (2.0 * h), 0.0),
+        PhotoMask::Slash(corners) => (0.0, f32::from(corners)),
+        PhotoMask::Rounded => (0.0, f32::from(ROUNDED_CORNERS)),
+    };
     let (u0, u1, v0, v1) = if image_aspect > box_aspect {
         let span = box_aspect / image_aspect;
         ((1.0 - span) / 2.0, (1.0 + span) / 2.0, 0.0, 1.0)
@@ -1031,18 +1101,22 @@ fn card_vertices(
         let span = image_aspect / box_aspect;
         (0.0, 1.0, (1.0 - span) / 2.0, (1.0 + span) / 2.0)
     };
-    let vertex = |px, py, u, v| Vertex {
+    let vertex = |px, py, u, v, card_u, card_v| Vertex {
         position: [px, py],
         uv: [u, v],
         alpha,
+        card_uv: [card_u, card_v],
+        arch_height,
+        card_aspect: box_aspect,
+        mask_bits,
     };
     [
-        vertex(x0, y0, u0, v0),
-        vertex(x0, y1, u0, v1),
-        vertex(x1, y1, u1, v1),
-        vertex(x0, y0, u0, v0),
-        vertex(x1, y1, u1, v1),
-        vertex(x1, y0, u1, v0),
+        vertex(x0, y0, u0, v0, 0.0, 0.0),
+        vertex(x0, y1, u0, v1, 0.0, 1.0),
+        vertex(x1, y1, u1, v1, 1.0, 1.0),
+        vertex(x0, y0, u0, v0, 0.0, 0.0),
+        vertex(x1, y1, u1, v1, 1.0, 1.0),
+        vertex(x1, y0, u1, v0, 1.0, 0.0),
     ]
 }
 
@@ -1174,6 +1248,48 @@ mod tests {
                 lowest_edge = lowest_edge.max(y + h);
             }
             assert!(near(lowest_edge, rows.top + rows.full));
+        }
+    }
+
+    #[test]
+    fn arch_selects_vertical_scroll_cards() {
+        let (_, horizontal_cards) = scroll_layout(4, 1.6, 1280.0, 800.0);
+        let (_, portrait_cards) = scroll_layout(3, 0.7, 1280.0, 800.0);
+        assert!(portrait_cards.iter().all(is_vertical_card));
+        assert!(horizontal_cards.iter().all(|rect| !is_vertical_card(rect)));
+        assert_eq!(
+            visible_mask(PhotoMask::Arch, &portrait_cards[0]),
+            PhotoMask::Arch
+        );
+        assert_eq!(
+            visible_mask(PhotoMask::Arch, &horizontal_cards[0]),
+            PhotoMask::None
+        );
+        assert_eq!(
+            visible_mask(
+                PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT),
+                &horizontal_cards[0]
+            ),
+            PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT)
+        );
+    }
+
+    #[test]
+    fn random_masks_include_each_slash_variant() {
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(7);
+        let masks: HashSet<_> = (0..1000).map(|_| random_photo_mask(&mut rng)).collect();
+        assert!(masks.contains(&PhotoMask::None));
+        assert!(masks.contains(&PhotoMask::Arch));
+        assert!(masks.contains(&PhotoMask::Rounded));
+        assert!(masks.contains(&PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT)));
+        assert!(masks.contains(&PhotoMask::Slash(TOP_RIGHT | BOTTOM_LEFT)));
+        assert!(masks.contains(&PhotoMask::Slash(
+            TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT
+        )));
+        for corner in [TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT] {
+            assert!(masks.contains(&PhotoMask::Slash(corner)));
         }
     }
 
