@@ -442,6 +442,17 @@ fn scroll_pattern_photo_count(pattern: usize) -> usize {
     }
 }
 
+fn scroll_photo_limit(patterns: &VecDeque<usize>, minimum: usize) -> usize {
+    let mut total = 0;
+    for &pattern in patterns {
+        total += scroll_pattern_photo_count(pattern);
+        if total >= minimum {
+            return total;
+        }
+    }
+    total
+}
+
 struct LayoutBag {
     available: Vec<usize>,
     remaining: Vec<usize>,
@@ -858,8 +869,13 @@ impl Renderer {
     }
 
     fn update(&mut self) -> bool {
+        if self.style == Style::Scroll {
+            while self.scroll_patterns.len() < 10 {
+                self.scroll_patterns.push_back(self.layout_bag.next());
+            }
+        }
         let photo_limit = match self.style {
-            Style::Scroll => 10,
+            Style::Scroll => scroll_photo_limit(&self.scroll_patterns, 10),
             Style::Slides => 4,
         };
         while self.photos.len() < photo_limit {
@@ -916,9 +932,6 @@ impl Renderer {
     }
 
     fn update_scroll(&mut self) {
-        while self.scroll_patterns.len() < 10 {
-            self.scroll_patterns.push_back(self.layout_bag.next());
-        }
         let now = Instant::now();
         let delta = now
             .duration_since(self.scroll_last_tick)
@@ -1652,6 +1665,15 @@ mod tests {
         assert!((before[1] + pair_width + gap - before[0]).abs() < 0.001);
         let after = scroll_group_lefts(before[1], &groups[1..], gap);
         assert_eq!(after[0], before[1]);
+    }
+
+    #[test]
+    fn scroll_preload_reaches_a_complete_group() {
+        let mut patterns = VecDeque::from([2, 6, 3, 5, 0]);
+        // Ten photos would stop one photo into the fourth layout.
+        assert_eq!(scroll_photo_limit(&patterns, 10), 12);
+        patterns.pop_front();
+        assert_eq!(scroll_photo_limit(&patterns, 10), 10);
     }
 
     #[test]
