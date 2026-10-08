@@ -2,6 +2,8 @@
 
 A fullscreen photo display for Ubuntu GNOME. It starts after you have been idle, scrolls through your photos, and closes when you return.
 
+![Ambient Photos showing a scrolling photo layout and clock](assets/ambient-photos-screenshot.webp)
+
 ## Quick start
 
 **Prebuilt archive.** Download `ambient-screensaver-v0.1.0-ubuntu-24.04-x86_64.tar.gz` from a release's Assets, or use the locally built copy in `dist/`. From the directory containing the archive, run:
