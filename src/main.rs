@@ -1,8 +1,9 @@
 mod clock;
 mod gnome;
 mod photos;
+mod polaroid;
 
-use chrono::Local;
+use chrono::{DateTime, Local, NaiveDate};
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
 use rand::{seq::SliceRandom, Rng};
 use std::{
@@ -40,6 +41,7 @@ const TOP_RIGHT: u8 = 2;
 const BOTTOM_RIGHT: u8 = 4;
 const BOTTOM_LEFT: u8 = 8;
 const ROUNDED_CORNERS: u8 = 16;
+const POLAROID: u8 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PhotoMask {
@@ -47,6 +49,7 @@ enum PhotoMask {
     Arch,
     Slash(u8),
     Rounded,
+    Polaroid,
 }
 
 fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
@@ -57,12 +60,13 @@ fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
         6 => PhotoMask::Slash(1 << rng.gen_range(0..4)),
         7 => PhotoMask::Slash(TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT),
         8 | 9 => PhotoMask::Rounded,
+        10 | 11 => PhotoMask::Polaroid,
         _ => PhotoMask::None,
     }
 }
 
 fn visible_mask(mask: PhotoMask, rect: &[f32; 4]) -> PhotoMask {
-    if mask == PhotoMask::Arch && !is_vertical_card(rect) {
+    if matches!(mask, PhotoMask::Arch | PhotoMask::Polaroid) && !is_vertical_card(rect) {
         PhotoMask::None
     } else {
         mask
@@ -225,14 +229,37 @@ struct DecodedPhoto {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
+    date: Option<NaiveDate>,
 }
 
-fn open_oriented(path: &Path) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+fn exif_capture_date(bytes: Vec<u8>) -> Option<NaiveDate> {
+    let exif = exif::Reader::new().read_raw(bytes).ok()?;
+    let field = exif.get_field(exif::Tag::DateTimeOriginal, exif::In::PRIMARY)?;
+    let exif::Value::Ascii(values) = &field.value else {
+        return None;
+    };
+    let text = std::str::from_utf8(values.first()?.get(..10)?).ok()?;
+    NaiveDate::parse_from_str(text, "%Y:%m:%d").ok()
+}
+
+fn file_modified_date(path: &Path) -> Option<NaiveDate> {
+    let modified = path.metadata().ok()?.modified().ok()?;
+    Some(DateTime::<Local>::from(modified).date_naive())
+}
+
+fn open_oriented(
+    path: &Path,
+) -> Result<(DynamicImage, Option<NaiveDate>), Box<dyn std::error::Error + Send + Sync>> {
     let mut decoder = ImageReader::open(path)?.into_decoder()?;
+    let capture_date = decoder
+        .exif_metadata()
+        .ok()
+        .flatten()
+        .and_then(exif_capture_date);
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     let mut image = DynamicImage::from_decoder(decoder)?;
     image.apply_orientation(orientation);
-    Ok(image)
+    Ok((image, capture_date.or_else(|| file_modified_date(path))))
 }
 
 fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
@@ -243,7 +270,7 @@ fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
         let mut failures = 0;
         while let Some(path) = bag.next() {
             match open_oriented(&path) {
-                Ok(image) => {
+                Ok((image, date)) => {
                     failures = 0;
                     let image = if image.width() > 2560 || image.height() > 2560 {
                         // Keep large-photo previews responsive in unoptimized builds.
@@ -261,6 +288,7 @@ fn start_loader(paths: Vec<PathBuf>) -> mpsc::Receiver<DecodedPhoto> {
                             width: image.width(),
                             height: image.height(),
                             pixels: image.into_raw(),
+                            date,
                         })
                         .is_err()
                     {
@@ -284,6 +312,7 @@ struct Photo {
     width: u32,
     height: u32,
     mask: PhotoMask,
+    date_label: Option<Box<Photo>>,
     bind_group: wgpu::BindGroup,
     _texture: wgpu::Texture,
 }
@@ -553,6 +582,7 @@ struct Renderer {
     sampler: wgpu::Sampler,
     vertices: wgpu::Buffer,
     clock: clock::Clock,
+    date_stamp: polaroid::DateStamp,
     clock_photo: Option<Photo>,
     clock_rect: [f32; 4],
     clock_key: String,
@@ -674,7 +704,7 @@ impl Renderer {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card vertices"),
-            size: (6 * 11 * std::mem::size_of::<Vertex>()) as u64,
+            size: (6 * 21 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -689,6 +719,7 @@ impl Renderer {
             sampler,
             vertices,
             clock: clock::Clock::new()?,
+            date_stamp: polaroid::DateStamp::new()?,
             clock_photo: None,
             clock_rect: [0.0; 4],
             clock_key: String::new(),
@@ -764,6 +795,7 @@ impl Renderer {
             width: decoded.width,
             height: decoded.height,
             mask,
+            date_label: None,
             bind_group,
             _texture: texture,
         }
@@ -792,12 +824,33 @@ impl Renderer {
                     if self.photos.is_empty() {
                         self.slide_started = Instant::now();
                     }
-                    let mask = if self.style == Style::Scroll {
+                    let mut mask = if self.style == Style::Scroll {
                         random_photo_mask(&mut rand::thread_rng())
                     } else {
                         PhotoMask::None
                     };
-                    self.photos.push_back(self.upload(decoded, mask));
+                    let date_label = if mask == PhotoMask::Polaroid {
+                        decoded.date.map(|date| {
+                            let image = self.date_stamp.draw(date);
+                            Box::new(self.upload(
+                                DecodedPhoto {
+                                    pixels: image.pixels,
+                                    width: image.width,
+                                    height: image.height,
+                                    date: None,
+                                },
+                                PhotoMask::None,
+                            ))
+                        })
+                    } else {
+                        None
+                    };
+                    if date_label.is_none() && mask == PhotoMask::Polaroid {
+                        mask = PhotoMask::None;
+                    }
+                    let mut photo = self.upload(decoded, mask);
+                    photo.date_label = date_label;
+                    self.photos.push_back(photo);
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return !self.photos.is_empty(),
@@ -986,6 +1039,7 @@ impl Renderer {
                     pixels: image.pixels,
                     width: image.width,
                     height: image.height,
+                    date: None,
                 },
                 PhotoMask::None,
             ));
@@ -1015,18 +1069,32 @@ impl Renderer {
         if let Some(photo) = &self.clock_photo {
             cards.push((photo, self.clock_rect, 1.0));
         }
-        let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
-        for (index, (photo, rect, alpha)) in cards.iter().enumerate() {
+        let mut draws = Vec::with_capacity(21);
+        for (photo, rect, alpha) in &cards {
             let mask = if self.style == Style::Scroll {
                 visible_mask(photo.mask, rect)
             } else {
                 PhotoMask::None
             };
-            let vertices = card_vertices(rect, *alpha, mask, photo, width, height);
+            draws.push((
+                *photo,
+                card_vertices(rect, *alpha, mask, photo, width, height),
+            ));
+            if mask == PhotoMask::Polaroid {
+                if let Some(label) = &photo.date_label {
+                    draws.push((
+                        label.as_ref(),
+                        polaroid_date_vertices(rect, *alpha, label, width, height),
+                    ));
+                }
+            }
+        }
+        let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
+        for (index, (_, vertices)) in draws.iter().enumerate() {
             self.queue.write_buffer(
                 &self.vertices,
                 index as u64 * stride,
-                bytemuck::cast_slice(&vertices),
+                bytemuck::cast_slice(vertices),
             );
         }
         {
@@ -1045,7 +1113,7 @@ impl Renderer {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.pipeline);
-            for (index, (photo, _, _)) in cards.iter().enumerate() {
+            for (index, (photo, _)) in draws.iter().enumerate() {
                 pass.set_bind_group(0, &photo.bind_group, &[]);
                 pass.set_vertex_buffer(
                     0,
@@ -1093,14 +1161,28 @@ fn card_vertices(
         PhotoMask::Arch => (w / (2.0 * h), 0.0),
         PhotoMask::Slash(corners) => (0.0, f32::from(corners)),
         PhotoMask::Rounded => (0.0, f32::from(ROUNDED_CORNERS)),
+        PhotoMask::Polaroid => (0.0, f32::from(POLAROID)),
     };
-    let (u0, u1, v0, v1) = if image_aspect > box_aspect {
-        let span = box_aspect / image_aspect;
+    let photo_aspect = if mask == PhotoMask::Polaroid {
+        box_aspect * 0.89 / 0.725
+    } else {
+        box_aspect
+    };
+    let (mut u0, mut u1, mut v0, mut v1) = if image_aspect > photo_aspect {
+        let span = photo_aspect / image_aspect;
         ((1.0 - span) / 2.0, (1.0 + span) / 2.0, 0.0, 1.0)
     } else {
-        let span = image_aspect / box_aspect;
+        let span = image_aspect / photo_aspect;
         (0.0, 1.0, (1.0 - span) / 2.0, (1.0 + span) / 2.0)
     };
+    if mask == PhotoMask::Polaroid {
+        let u_span = u1 - u0;
+        let v_span = v1 - v0;
+        u1 = u0 + (1.0 - 0.055) / 0.89 * u_span;
+        u0 -= 0.055 / 0.89 * u_span;
+        v1 = v0 + (1.0 - 0.055) / 0.725 * v_span;
+        v0 -= 0.055 / 0.725 * v_span;
+    }
     let vertex = |px, py, u, v, card_u, card_v| Vertex {
         position: [px, py],
         uv: [u, v],
@@ -1118,6 +1200,38 @@ fn card_vertices(
         vertex(x1, y1, u1, v1, 1.0, 1.0),
         vertex(x1, y0, u1, v0, 1.0, 0.0),
     ]
+}
+
+fn polaroid_date_vertices(
+    card: &[f32; 4],
+    alpha: f32,
+    label: &Photo,
+    screen_w: f32,
+    screen_h: f32,
+) -> [Vertex; 6] {
+    let label_width = card[2] * 0.64;
+    let label_height = label_width * label.height as f32 / label.width as f32;
+    let rect = [
+        card[0] + (card[2] - label_width) / 2.0,
+        card[1] + card[3] * 0.78 + (card[3] * 0.22 - label_height) / 2.0,
+        label_width,
+        label_height,
+    ];
+    let mut vertices = card_vertices(&rect, alpha, PhotoMask::None, label, screen_w, screen_h);
+    let center_x = rect[0] + rect[2] / 2.0;
+    let center_y = rect[1] + rect[3] / 2.0;
+    let (sin, cos) = (-7.0_f32).to_radians().sin_cos();
+    for vertex in &mut vertices {
+        let x = (vertex.position[0] + 1.0) * screen_w / 2.0 - center_x;
+        let y = (1.0 - vertex.position[1]) * screen_h / 2.0 - center_y;
+        let rotated_x = center_x + x * cos - y * sin;
+        let rotated_y = center_y + x * sin + y * cos;
+        vertex.position = [
+            rotated_x / screen_w * 2.0 - 1.0,
+            1.0 - rotated_y / screen_h * 2.0,
+        ];
+    }
+    vertices
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -1266,6 +1380,14 @@ mod tests {
             PhotoMask::None
         );
         assert_eq!(
+            visible_mask(PhotoMask::Polaroid, &portrait_cards[0]),
+            PhotoMask::Polaroid
+        );
+        assert_eq!(
+            visible_mask(PhotoMask::Polaroid, &horizontal_cards[0]),
+            PhotoMask::None
+        );
+        assert_eq!(
             visible_mask(
                 PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT),
                 &horizontal_cards[0]
@@ -1275,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn random_masks_include_each_slash_variant() {
+    fn random_masks_include_each_variant() {
         use rand::SeedableRng;
 
         let mut rng = rand::rngs::StdRng::seed_from_u64(7);
@@ -1283,6 +1405,7 @@ mod tests {
         assert!(masks.contains(&PhotoMask::None));
         assert!(masks.contains(&PhotoMask::Arch));
         assert!(masks.contains(&PhotoMask::Rounded));
+        assert!(masks.contains(&PhotoMask::Polaroid));
         assert!(masks.contains(&PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT)));
         assert!(masks.contains(&PhotoMask::Slash(TOP_RIGHT | BOTTOM_LEFT)));
         assert!(masks.contains(&PhotoMask::Slash(
@@ -1291,6 +1414,28 @@ mod tests {
         for corner in [TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT] {
             assert!(masks.contains(&PhotoMask::Slash(corner)));
         }
+    }
+
+    #[test]
+    fn exif_capture_date_is_preferred_when_available() {
+        let mut exif = vec![b'I', b'I', 42, 0, 8, 0, 0, 0];
+        exif.extend_from_slice(&1_u16.to_le_bytes());
+        exif.extend_from_slice(&0x8769_u16.to_le_bytes());
+        exif.extend_from_slice(&4_u16.to_le_bytes());
+        exif.extend_from_slice(&1_u32.to_le_bytes());
+        exif.extend_from_slice(&26_u32.to_le_bytes());
+        exif.extend_from_slice(&0_u32.to_le_bytes());
+        exif.extend_from_slice(&1_u16.to_le_bytes());
+        exif.extend_from_slice(&0x9003_u16.to_le_bytes());
+        exif.extend_from_slice(&2_u16.to_le_bytes());
+        exif.extend_from_slice(&20_u32.to_le_bytes());
+        exif.extend_from_slice(&44_u32.to_le_bytes());
+        exif.extend_from_slice(&0_u32.to_le_bytes());
+        exif.extend_from_slice(b"2026:10:07 12:34:56\0");
+        assert_eq!(
+            exif_capture_date(exif),
+            NaiveDate::from_ymd_opt(2026, 10, 7)
+        );
     }
 
     #[test]
@@ -1398,7 +1543,8 @@ mod tests {
         std::fs::write(&path, oriented_jpeg).unwrap();
         let result = open_oriented(&path);
         std::fs::remove_file(&path).unwrap();
-        let image = result.unwrap();
+        let (image, date) = result.unwrap();
         assert_eq!((image.width(), image.height()), (1, 2));
+        assert!(date.is_some());
     }
 }

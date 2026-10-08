@@ -69,5 +69,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     if (corners & 16u) != 0u {
         mask *= 1.0 - smoothstep(-round_edge, round_edge, round_distance);
     }
+    if (corners & 32u) != 0u {
+        let paper = vec3<f32>(0.985, 0.98, 0.965);
+        let inside_photo = u >= 0.055 && u <= 0.945 && v >= 0.055 && v <= 0.78;
+        let rgb = select(paper, mix(paper, color.rgb, color.a), inside_photo);
+        return vec4<f32>(rgb, input.alpha);
+    }
     return vec4<f32>(color.rgb, color.a * input.alpha * mask);
 }

@@ -8,6 +8,7 @@ bytemuck = { version = "1.16", features = ["derive"] }
 chrono = "0.4"
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp", "tiff"] }
+kamadak-exif = "0.6"
 pollster = "0.3"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
