@@ -32,6 +32,7 @@ struct Vertex {
     arch_height: f32,
     card_aspect: f32,
     mask_bits: f32,
+    corner_radius: f32,
 }
 
 fn is_vertical_card(rect: &[f32; 4]) -> bool {
@@ -42,26 +43,23 @@ const TOP_LEFT: u8 = 1;
 const TOP_RIGHT: u8 = 2;
 const BOTTOM_RIGHT: u8 = 4;
 const BOTTOM_LEFT: u8 = 8;
-const ROUNDED_CORNERS: u8 = 16;
 const POLAROID: u8 = 32;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PhotoMask {
     None,
     Arch,
-    Slash(u8),
-    Rounded,
+    LargeCorners(u8),
     Polaroid,
 }
 
 fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
     match rng.gen_range(0..24) {
         0..=3 => PhotoMask::Arch,
-        4 => PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT),
-        5 => PhotoMask::Slash(TOP_RIGHT | BOTTOM_LEFT),
-        6 => PhotoMask::Slash(1 << rng.gen_range(0..4)),
-        7 => PhotoMask::Slash(TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT),
-        8 | 9 => PhotoMask::Rounded,
+        4 => PhotoMask::LargeCorners(TOP_LEFT | BOTTOM_RIGHT),
+        5 => PhotoMask::LargeCorners(TOP_RIGHT | BOTTOM_LEFT),
+        6 => PhotoMask::LargeCorners(1 << rng.gen_range(0..4)),
+        7 => PhotoMask::LargeCorners(TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT),
         10 | 11 => PhotoMask::Polaroid,
         _ => PhotoMask::None,
     }
@@ -423,6 +421,15 @@ fn portrait_card_size(width: f32, height: f32) -> (f32, f32) {
     (card_width, card_height)
 }
 
+fn card_corner_radius(screen_w: f32, screen_h: f32, card_w: f32, card_h: f32) -> f32 {
+    (portrait_card_size(screen_w, screen_h).0 * 0.18).min(card_w.min(card_h) * 0.28)
+}
+
+fn polaroid_photo_bounds(card_aspect: f32) -> [f32; 4] {
+    let side_inset = 0.055;
+    [side_inset, side_inset * card_aspect, 1.0 - side_inset, 0.78]
+}
+
 const SCROLL_PATTERN_COUNT: usize = 8;
 
 fn scroll_pattern_photo_count(pattern: usize) -> usize {
@@ -727,7 +734,7 @@ impl Renderer {
             vertex: wgpu::VertexState { module: &shader, entry_point: "vs_main", buffers: &[wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<Vertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2, 4 => Float32, 5 => Float32, 6 => Float32],
+                attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32, 3 => Float32x2, 4 => Float32, 5 => Float32, 6 => Float32, 7 => Float32],
             }] },
             fragment: Some(wgpu::FragmentState { module: &shader, entry_point: "fs_main", targets: &[Some(wgpu::ColorTargetState {
                 format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL,
@@ -1277,12 +1284,14 @@ fn card_vertices(
     let (arch_height, mask_bits) = match mask {
         PhotoMask::None => (0.0, 0.0),
         PhotoMask::Arch => (w / (2.0 * h), 0.0),
-        PhotoMask::Slash(corners) => (0.0, f32::from(corners)),
-        PhotoMask::Rounded => (0.0, f32::from(ROUNDED_CORNERS)),
+        PhotoMask::LargeCorners(corners) => (0.0, f32::from(corners)),
         PhotoMask::Polaroid => (0.0, f32::from(POLAROID)),
     };
+    let [photo_left, photo_top, photo_right, photo_bottom] = polaroid_photo_bounds(box_aspect);
+    let photo_width = photo_right - photo_left;
+    let photo_height = photo_bottom - photo_top;
     let photo_aspect = if mask == PhotoMask::Polaroid {
-        box_aspect * 0.89 / 0.725
+        box_aspect * photo_width / photo_height
     } else {
         box_aspect
     };
@@ -1296,10 +1305,10 @@ fn card_vertices(
     if mask == PhotoMask::Polaroid {
         let u_span = u1 - u0;
         let v_span = v1 - v0;
-        u1 = u0 + (1.0 - 0.055) / 0.89 * u_span;
-        u0 -= 0.055 / 0.89 * u_span;
-        v1 = v0 + (1.0 - 0.055) / 0.725 * v_span;
-        v0 -= 0.055 / 0.725 * v_span;
+        u1 = u0 + (1.0 - photo_left) / photo_width * u_span;
+        u0 -= photo_left / photo_width * u_span;
+        v1 = v0 + (1.0 - photo_top) / photo_height * v_span;
+        v0 -= photo_top / photo_height * v_span;
     }
     let vertex = |px, py, u, v, card_u, card_v| Vertex {
         position: [px, py],
@@ -1309,6 +1318,7 @@ fn card_vertices(
         arch_height,
         card_aspect: box_aspect,
         mask_bits,
+        corner_radius: card_corner_radius(screen_w, screen_h, w, h) / h,
     };
     [
         vertex(x0, y0, u0, v0, 0.0, 0.0),
@@ -1499,6 +1509,30 @@ mod tests {
     }
 
     #[test]
+    fn portrait_and_landscape_cards_share_one_pixel_corner_radius() {
+        let (screen_w, screen_h) = (1280.0, 800.0);
+        let original_portrait_radius = portrait_card_size(screen_w, screen_h).0 * 0.18;
+        for pattern in 0..SCROLL_PATTERN_COUNT {
+            let (_, rects) = scroll_layout(pattern, 0.7, screen_w, screen_h);
+            for [_, _, width, height] in rects {
+                let radius = card_corner_radius(screen_w, screen_h, width, height);
+                assert!((radius - original_portrait_radius).abs() < 0.001);
+            }
+        }
+        assert_eq!(card_corner_radius(screen_w, screen_h, 100.0, 100.0), 28.0);
+    }
+
+    #[test]
+    fn polaroid_top_and_side_margins_match_in_pixels() {
+        for (width, height) in [(460.0, 688.0), (320.0, 720.0)] {
+            let [left, top, right, bottom] = polaroid_photo_bounds(width / height);
+            assert!((left * width - top * height).abs() < 0.001);
+            assert!(((1.0 - right) * width - top * height).abs() < 0.001);
+            assert!(bottom > top);
+        }
+    }
+
+    #[test]
     fn arch_selects_vertical_scroll_cards() {
         let (_, horizontal_cards) = scroll_layout(4, 1.6, 1280.0, 800.0);
         let (_, portrait_cards) = scroll_layout(3, 0.7, 1280.0, 800.0);
@@ -1522,10 +1556,10 @@ mod tests {
         );
         assert_eq!(
             visible_mask(
-                PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT),
+                PhotoMask::LargeCorners(TOP_LEFT | BOTTOM_RIGHT),
                 &horizontal_cards[0]
             ),
-            PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT)
+            PhotoMask::LargeCorners(TOP_LEFT | BOTTOM_RIGHT)
         );
     }
 
@@ -1537,15 +1571,14 @@ mod tests {
         let masks: HashSet<_> = (0..1000).map(|_| random_photo_mask(&mut rng)).collect();
         assert!(masks.contains(&PhotoMask::None));
         assert!(masks.contains(&PhotoMask::Arch));
-        assert!(masks.contains(&PhotoMask::Rounded));
         assert!(masks.contains(&PhotoMask::Polaroid));
-        assert!(masks.contains(&PhotoMask::Slash(TOP_LEFT | BOTTOM_RIGHT)));
-        assert!(masks.contains(&PhotoMask::Slash(TOP_RIGHT | BOTTOM_LEFT)));
-        assert!(masks.contains(&PhotoMask::Slash(
+        assert!(masks.contains(&PhotoMask::LargeCorners(TOP_LEFT | BOTTOM_RIGHT)));
+        assert!(masks.contains(&PhotoMask::LargeCorners(TOP_RIGHT | BOTTOM_LEFT)));
+        assert!(masks.contains(&PhotoMask::LargeCorners(
             TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT
         )));
         for corner in [TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT] {
-            assert!(masks.contains(&PhotoMask::Slash(corner)));
+            assert!(masks.contains(&PhotoMask::LargeCorners(corner)));
         }
     }
 
