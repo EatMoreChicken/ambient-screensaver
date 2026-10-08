@@ -363,6 +363,7 @@ struct ScrollHistoryGroup {
 const SCROLL_PAUSE: Duration = Duration::from_secs(3);
 const SCROLL_HISTORY_PHOTOS: usize = 8;
 const SCROLL_KEY_SPEED: f32 = 0.65;
+const SCROLL_HORIZONTAL_GAP: f32 = 0.028;
 
 fn scroll_motion(
     delta: f32,
@@ -405,7 +406,7 @@ impl ScrollRows {
     fn new(height: f32) -> Self {
         let top = height * 0.07;
         let full = height * 0.86;
-        let gap = height * 0.03;
+        let gap = height * 0.04;
         let half = (full - gap) / 2.0;
         Self {
             top,
@@ -491,7 +492,7 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
         }
         2 => {
             let (left_width, card_height) = portrait_card_size(width, height);
-            let right_x = left_width + width * 0.02;
+            let right_x = left_width + width * SCROLL_HORIZONTAL_GAP;
             let right_width = width * 0.33;
             (
                 right_x + right_width,
@@ -504,7 +505,7 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
         }
         3 => {
             let (card_width, card_height) = portrait_card_size(width, height);
-            let second_x = card_width + width * 0.02;
+            let second_x = card_width + width * SCROLL_HORIZONTAL_GAP;
             (
                 second_x + card_width,
                 vec![
@@ -525,7 +526,7 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
         }
         5 => {
             let (card_width, card_height) = portrait_card_size(width, height);
-            let step = card_width + width * 0.018;
+            let step = card_width + width * SCROLL_HORIZONTAL_GAP;
             (
                 step * 2.0 + card_width,
                 vec![
@@ -537,7 +538,7 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
         }
         6 => {
             let card_width = width * 0.34;
-            let second_x = card_width + width * 0.02;
+            let second_x = card_width + width * SCROLL_HORIZONTAL_GAP;
             (
                 second_x + card_width,
                 vec![
@@ -551,7 +552,7 @@ fn scroll_layout(mode: usize, first_aspect: f32, width: f32, height: f32) -> (f3
         7 => {
             let (portrait_width, portrait_height) = portrait_card_size(width, height);
             let stack_width = width * 0.33;
-            let tall_x = stack_width + width * 0.02;
+            let tall_x = stack_width + width * SCROLL_HORIZONTAL_GAP;
             (
                 tall_x + portrait_width,
                 vec![
@@ -924,7 +925,7 @@ impl Renderer {
         if groups.len() < 2 {
             return;
         }
-        let gap = width * 0.018;
+        let gap = width * SCROLL_HORIZONTAL_GAP;
         if self.scroll_head_x.is_none() {
             let x = width - groups[0].width;
             if scroll_group_lefts(x, &groups, gap)
@@ -978,7 +979,7 @@ impl Renderer {
         if groups.len() < 2 {
             return;
         }
-        let gap = width * 0.018;
+        let gap = width * SCROLL_HORIZONTAL_GAP;
         let leftmost = scroll_group_lefts(head_x, &groups, gap)
             .last()
             .copied()
@@ -1015,7 +1016,7 @@ impl Renderer {
         let Some(mut head_x) = self.scroll_head_x.map(|x| x - distance) else {
             return;
         };
-        let gap = width * 0.018;
+        let gap = width * SCROLL_HORIZONTAL_GAP;
         loop {
             let groups = self.scroll_groups(width, height);
             let Some(first) = groups.first() else {
@@ -1081,7 +1082,7 @@ impl Renderer {
             return Vec::new();
         };
         let groups = self.scroll_groups(width, height);
-        let lefts = scroll_group_lefts(head_x, &groups, width * 0.018);
+        let lefts = scroll_group_lefts(head_x, &groups, width * SCROLL_HORIZONTAL_GAP);
         let mut cards = Vec::new();
         for (group, left) in groups.iter().zip(lefts) {
             for (slot, local_rect) in group.rects.iter().enumerate() {
