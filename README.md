@@ -1,6 +1,31 @@
 # Ambient Photos
 
-A standalone ambient photo display for Ubuntu, inspired by ChromeOS and Google Ambient Mode. It is built in Rust with `wgpu` and `winit`, with Wayland compatibility as a priority. You can launch it directly or use the development idle launcher on Ubuntu GNOME.
+A standalone ambient photo display for Ubuntu, inspired by ChromeOS and Google Ambient Mode. It is built in Rust with `wgpu` and `winit`, with Wayland compatibility as a priority. You can launch it directly or install its GNOME idle integration for your user account.
+
+## Quick start and removal (planned release)
+
+**The downloadable archive is not published yet.** This is the intended setup for Ubuntu Desktop users once it is available. For now, use the [source-build instructions](#set-up-gnome-idle-activation) below.
+
+Download the Linux x86-64 `.tar.gz` archive from the project's future Releases page, then run these commands in the directory where you downloaded it:
+
+```sh
+tar -xzf ambient-screensaver-linux-x86_64.tar.gz
+cd ambient-screensaver-linux-x86_64
+./ambient-screensaver gnome install --idle-seconds 120 "$HOME/Pictures"
+```
+
+The archive will contain the compiled `ambient-screensaver` executable. Replace `"$HOME/Pictures"` with a directory that contains your photos; you can add more directories to the same command. The installer copies the executable into your user account, saves the photo paths, and starts it automatically at your next GNOME login. You can delete the extracted archive directory after installation. Rust and Cargo are not needed to use the downloaded build.
+
+To update, download and extract the newer archive, then run its `gnome install` command again with your photo directories and idle timeout. There is no need to uninstall first. The command replaces the installed binary and settings; a watcher already running keeps using the previous version until your next GNOME login. You can check your current paths and timeout with `gnome status` before updating.
+
+To check the installed setup or remove it later:
+
+```sh
+~/.local/share/ambient-screensaver/bin/ambient-screensaver gnome status
+~/.local/share/ambient-screensaver/bin/ambient-screensaver gnome uninstall
+```
+
+Removal deletes the installed executable, saved settings, and login entry. If the idle watcher is already running, it stops when you log out. Keep your photo directories in place for as long as you use the app.
 
 ## Current state
 
@@ -10,7 +35,7 @@ A standalone ambient photo display for Ubuntu, inspired by ChromeOS and Google A
 - Fades in the first complete photo scene over 1.5 seconds. A small, centered line in the bottom mat shows the local weekday, date, and time; it updates each minute and remains visible while photos load.
 - Starts fullscreen, hides the pointer, and closes on keyboard, mouse, or pointer activity. `--windowed` opens a resizable preview.
 
-This is still a development preview. A GNOME idle launcher is available, but it must be started manually; saved settings, a desktop launcher, and an installer have not been added yet.
+This is still a development preview. GNOME setup works from a source build; the downloadable archive described above is future work.
 
 ## Build and run
 
@@ -46,39 +71,49 @@ cargo run --release -- --background-color '#DCE8E0' /path/to/photos
 
 The clock text is dark grey and uses the system's DejaVu Sans or Liberation Sans font.
 
-## Start when idle on Ubuntu GNOME
+## Set up GNOME idle activation
 
-The development launcher uses GNOME's idle monitor to wait for inactivity, then starts the existing screensaver binary. It does not start while the screen is locked. After the display closes, it waits for new user activity before it can launch again. This launcher is specific to Ubuntu/GNOME; it does not replace the lock screen.
+The Rust application talks to GNOME's idle monitor directly. It starts the photo display after the configured inactivity period, skips launch while the screen is locked, and waits for user activity before another launch. It does not replace GNOME's lock screen. Set the idle threshold below GNOME's blank-screen or lock timeout.
 
-From the repo root, build the binary once, check that the GNOME services are available, and run the launcher in a terminal:
+From the repo root, build and check the GNOME connection, then install for your user account:
 
 ```sh
 cargo build --release
-python3 scripts/idle_launcher.py --check
-python3 scripts/idle_launcher.py --idle-seconds 120 /path/to/photos
+./target/release/ambient-screensaver gnome check
+./target/release/ambient-screensaver gnome install --idle-seconds 120 /path/to/photos
 ```
 
-The default idle threshold is two minutes. Set it lower than GNOME's screen lock timeout so the photos can appear before the lock screen. The launcher needs Python 3 and `gdbus` (provided by Ubuntu's `libglib2.0-bin`). Leave this terminal open, or run it as a temporary user service for the current login session:
+`install` copies the compiled app to `~/.local/share/ambient-screensaver/bin/`, saves the absolute photo paths and timeout in `~/.config/ambient-screensaver/gnome.json`, and adds a GNOME-only login entry under `~/.config/autostart/`. It needs no root access or Python process. The source checkout can move after installation if the photo directories remain at their saved paths. The default threshold is 120 seconds. Run `install` again to update the settings or installed binary after rebuilding. If you use custom `XDG_CONFIG_HOME` or `XDG_DATA_HOME` directories, those replace the default locations.
+
+To check the setup or test it immediately in the current session, use the installed copy in a terminal:
 
 ```sh
-systemd-run --user --unit=ambient-photos-idle --collect \
-  /usr/bin/python3 "$PWD/scripts/idle_launcher.py" --idle-seconds 120 /path/to/photos
+~/.local/share/ambient-screensaver/bin/ambient-screensaver gnome status
+~/.local/share/ambient-screensaver/bin/ambient-screensaver gnome run
 ```
 
-Stop that service with `systemctl --user stop ambient-photos-idle.service`. The launcher runs `target/release/ambient-screensaver`; rebuild with `cargo build --release` after code changes. A permanent setup that starts automatically at login is still on the roadmap.
+For a quick test before the next login, install with `--idle-seconds 15`, run `gnome run`, wait 15 seconds without input, then move the mouse to close the display and press Ctrl+C to stop the watcher. Re-run `install --idle-seconds 120 /path/to/photos` for normal use. At the next GNOME login, the watcher starts automatically. If it is already running, `gnome run` reports that another watcher is active; use `gnome status` to check the installation instead.
+
+To remove the GNOME setup, run:
+
+```sh
+~/.local/share/ambient-screensaver/bin/ambient-screensaver gnome uninstall
+```
+
+Uninstall removes the copied binary, saved settings, and login entry. A watcher already running in this session exits when you log out or stop it with Ctrl+C.
 
 ## Roadmap
 
-- [ ] Add a saved idle timeout and automatic startup with the Ubuntu/GNOME graphical session.
-- [ ] Add saved settings for photo directories and display options, so launching no longer requires command-line arguments.
+- [x] Add native GNOME login startup with saved photo paths and an idle timeout.
+- [ ] Add saved display options to the GNOME setup command.
 - [ ] Continue refining the visuals and consider gentle pan and zoom, rounded photo cards, soft shadows, and alternate backgrounds.
 - [ ] Explore photo metadata, face-aware cropping, weather, and multi-monitor behavior.
+- [ ] More fun shapes and layouts
 
 ### Packaging and release
 
-- [ ] Add a first-run way to select photo directories and a desktop launcher with an icon.
-- [ ] Package an installable Ubuntu `.deb` so users do not need Rust or Cargo.
-- [ ] Add automated build and test workflows, then publish tagged release packages with installation instructions.
+- [ ] Publish a tested Linux x86-64 `.tar.gz` containing the compiled binary and brief instructions, following the quick start above.
+- [ ] Add automated build and test workflows for tagged releases; consider more CPU architectures and an Ubuntu `.deb` afterward.
 
 Replacing the GNOME lock screen or handling authentication is outside the planned scope.
 
@@ -88,5 +123,4 @@ Replacing the GNOME lock screen or handling authentication is outside the planne
 cargo fmt --check
 cargo test
 cargo clippy -- -D warnings
-python3 -m unittest discover -s tests
 ```

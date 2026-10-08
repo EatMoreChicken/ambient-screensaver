@@ -1,4 +1,5 @@
 mod clock;
+mod gnome;
 mod photos;
 
 use chrono::Local;
@@ -124,6 +125,7 @@ fn settings() -> Result<Settings, String> {
         match arg.as_str() {
             "--help" | "-h" => {
                 println!("Usage: ambient-screensaver [--windowed] [--style scroll|slides] [--scroll-speed SCREENS_PER_MINUTE] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
+                println!("GNOME setup: ambient-screensaver gnome install [--idle-seconds N] PHOTO_DIR [PHOTO_DIR ...]");
                 std::process::exit(0);
             }
             "--windowed" => settings.windowed = true,
@@ -1045,6 +1047,9 @@ fn card_vertices(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args().nth(1).as_deref() == Some("gnome") {
+        return gnome::run(env::args().skip(2).collect());
+    }
     let settings = settings()?;
     let paths = photos::discover(&settings.directories);
     if paths.is_empty() {
