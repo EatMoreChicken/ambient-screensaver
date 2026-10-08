@@ -71,6 +71,10 @@ The default is a continuous rightward scroll at 1.25 screen widths per minute. U
 
 The app reads JPEG, PNG, WebP, GIF, BMP, and TIFF files recursively and corrects photo orientation. Scroll cards can have an arch, slash-cut corners, rounded corners, or a Polaroid frame. Polaroid dates use the photo's EXIF capture date when available, then the file's modified date. Videos are not supported. Fullscreen mode closes on keyboard, mouse, or pointer activity.
 
+## Fonts
+
+The clock uses [Fredoka Medium](https://github.com/hafontia-zz/Fredoka-One), and Polaroid dates use [Caveat](https://github.com/googlefonts/caveat). Both fonts are embedded in the executable, so no system font installation or separate font files are needed at runtime. Their SIL Open Font License notices are in [assets/fonts/fredoka/OFL.txt](assets/fonts/fredoka/OFL.txt) and [assets/fonts/caveat/OFL.txt](assets/fonts/caveat/OFL.txt). Run `ambient-screensaver --font-licenses` to read both notices from any copy of the executable.
+
 ## Next steps
 
 - [ ] Publish the tested Ubuntu 24.04 x86-64 `.tar.gz` on GitHub, then automate tagged release builds.

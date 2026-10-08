@@ -1,4 +1,5 @@
 mod clock;
+mod fonts;
 mod gnome;
 mod photos;
 mod polaroid;
@@ -172,6 +173,7 @@ fn settings() -> Result<Settings, String> {
             "--help" | "-h" => {
                 println!("Usage: ambient-screensaver [--windowed] [--style scroll|slides] [--scroll-speed SCREENS_PER_MINUTE] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
                 println!("GNOME setup: ambient-screensaver gnome install [--idle-seconds N] PHOTO_DIR [PHOTO_DIR ...]");
+                println!("Font licenses: ambient-screensaver --font-licenses");
                 std::process::exit(0);
             }
             "--windowed" => settings.windowed = true,
@@ -1235,6 +1237,10 @@ fn polaroid_date_vertices(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if env::args().nth(1).as_deref() == Some("--font-licenses") {
+        fonts::print_licenses();
+        return Ok(());
+    }
     if env::args().nth(1).as_deref() == Some("gnome") {
         return gnome::run(env::args().skip(2).collect());
     }

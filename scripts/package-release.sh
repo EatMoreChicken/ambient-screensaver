@@ -40,7 +40,8 @@ docker run --rm --user "$(id -u):$(id -g)" \
 tar -czf "dist/$name.tar.gz" \
   --transform="s|^|$name/|" \
   -C target/ubuntu-24.04/release ambient-screensaver \
-  -C "$repo_dir" README.md assets/ambient-photos-demo.gif
+  -C "$repo_dir" README.md assets/ambient-photos-demo.gif \
+  assets/fonts/README.md assets/fonts/fredoka/OFL.txt assets/fonts/caveat/OFL.txt
 (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
 
 echo "Created dist/$name.tar.gz"

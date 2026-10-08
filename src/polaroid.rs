@@ -7,11 +7,6 @@ use fontdue::{
 pub const LABEL_WIDTH: u32 = 512;
 pub const LABEL_HEIGHT: u32 = 96;
 
-const FONT_PATHS: &[&str] = &[
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Italic.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Oblique.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-];
 const INK: [u8; 3] = [58, 54, 50];
 
 pub struct DateStamp {
@@ -26,14 +21,9 @@ pub struct LabelImage {
 
 impl DateStamp {
     pub fn new() -> Result<Self, String> {
-        for path in FONT_PATHS {
-            if let Ok(bytes) = std::fs::read(path) {
-                if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                    return Ok(Self { font });
-                }
-            }
-        }
-        Err("could not load a Polaroid date font; install Liberation Mono or DejaVu Sans".into())
+        Font::from_bytes(crate::fonts::POLAROID, FontSettings::default())
+            .map(|font| Self { font })
+            .map_err(|error| format!("could not load the bundled Caveat font: {error}"))
     }
 
     pub fn draw(&self, date: NaiveDate) -> LabelImage {
@@ -81,5 +71,12 @@ mod tests {
         let date = chrono::NaiveDate::from_ymd_opt(2026, 10, 7).unwrap();
         let image = stamp.draw(date);
         assert!(image.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
+        let ink_on_edge = (0..image.width).any(|x| {
+            [0, image.height - 1].into_iter().any(|y| {
+                let offset = ((y * image.width + x) * 4 + 3) as usize;
+                image.pixels[offset] > 0
+            })
+        });
+        assert!(!ink_on_edge);
     }
 }

@@ -4,11 +4,6 @@ use fontdue::{
     Font, FontSettings,
 };
 
-const FONT_PATHS: &[&str] = &[
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-];
 const TEXT_COLOR: [u8; 3] = [68, 68, 68];
 
 pub struct Clock {
@@ -31,14 +26,9 @@ where
 
 impl Clock {
     pub fn new() -> Result<Self, String> {
-        for path in FONT_PATHS {
-            if let Ok(bytes) = std::fs::read(path) {
-                if let Ok(font) = Font::from_bytes(bytes, FontSettings::default()) {
-                    return Ok(Self { font });
-                }
-            }
-        }
-        Err("could not load a clock font; install DejaVu Sans or Liberation Sans".into())
+        Font::from_bytes(crate::fonts::CLOCK, FontSettings::default())
+            .map(|font| Self { font })
+            .map_err(|error| format!("could not load the bundled Fredoka font: {error}"))
     }
 
     pub fn draw(
@@ -49,7 +39,7 @@ impl Clock {
     ) -> ClockImage {
         let width = screen.0;
         let height = (screen.1 as f32 * 0.04).floor().max(1.0) as u32;
-        let font_size = (screen.1 as f32 * 0.019)
+        let font_size = (screen.1 as f32 * 0.022)
             .min(screen.0 as f32 * 0.028)
             .min(height as f32 * 0.62);
         let bottom_mat_height = screen.1 as f32 * bottom_mat_fraction;
@@ -125,5 +115,15 @@ mod tests {
         assert!(!ink_x.is_empty());
         let center = (ink_x[0] + ink_x[ink_x.len() - 1]) as i32 / 2;
         assert!((center - 640).abs() <= 2);
+        let ink_y: Vec<_> = (0..image.height)
+            .filter(|&y| {
+                (0..image.width).any(|x| {
+                    let offset = ((y * image.width + x) * 4 + 3) as usize;
+                    image.pixels[offset] > 0
+                })
+            })
+            .collect();
+        assert!(ink_y[0] > 0);
+        assert!(ink_y[ink_y.len() - 1] < image.height - 1);
     }
 }

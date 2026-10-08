@@ -6,7 +6,7 @@ Use this checklist for each version. The package script currently builds an x86-
 
 1. Update the version in `Cargo.toml` and the archive name in `README.md`. Commit the release changes and push that commit to GitHub.
 2. On an x86-64 machine with Docker and Rust installed through rustup, run `scripts/package-release.sh` from the repo root. It prints the paths to an archive and its `.sha256` file under ignored `dist/`.
-3. Verify the checksum and archive contents, replacing `VERSION` with the version in `Cargo.toml`:
+3. Verify the checksum and archive contents, including both font license notices, replacing `VERSION` with the version in `Cargo.toml`:
 
    ```sh
    cd dist
