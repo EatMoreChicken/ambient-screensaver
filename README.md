@@ -2,7 +2,9 @@
 
 A fullscreen photo display for Ubuntu GNOME. It starts after you have been idle, scrolls through your photos, and closes when you return.
 
-![Ambient Photos scrolling through photo layouts with a clock](assets/ambient-photos-demo.gif)
+<p align="center">
+  <img src="assets/ambient-photos-demo.gif" alt="Ambient Photos scrolling through photo layouts with a clock">
+</p>
 
 ## Quick start
 
