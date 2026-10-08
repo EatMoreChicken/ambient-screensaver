@@ -45,6 +45,8 @@ const TOP_RIGHT: u8 = 2;
 const BOTTOM_RIGHT: u8 = 4;
 const BOTTOM_LEFT: u8 = 8;
 const POLAROID: u8 = 32;
+const STAMP: u8 = 64;
+const STAMP_COLOR_COUNT: u8 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum PhotoMask {
@@ -52,6 +54,7 @@ enum PhotoMask {
     Arch,
     LargeCorners(u8),
     Polaroid,
+    Stamp(u8),
 }
 
 fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
@@ -61,6 +64,7 @@ fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
         5 => PhotoMask::LargeCorners(TOP_RIGHT | BOTTOM_LEFT),
         6 => PhotoMask::LargeCorners(1 << rng.gen_range(0..4)),
         7 => PhotoMask::LargeCorners(TOP_LEFT | TOP_RIGHT | BOTTOM_RIGHT | BOTTOM_LEFT),
+        8 | 9 => PhotoMask::Stamp(rng.gen_range(0..STAMP_COLOR_COUNT)),
         10 | 11 => PhotoMask::Polaroid,
         _ => PhotoMask::None,
     }
@@ -434,6 +438,16 @@ fn card_corner_radius(screen_w: f32, screen_h: f32, card_w: f32, card_h: f32) ->
 fn polaroid_photo_bounds(card_aspect: f32) -> [f32; 4] {
     let side_inset = 0.055;
     [side_inset, side_inset * card_aspect, 1.0 - side_inset, 0.78]
+}
+
+fn stamp_photo_bounds(card_w: f32, card_h: f32, radius_px: f32) -> [f32; 4] {
+    let inset = radius_px * 0.55;
+    [
+        inset / card_w,
+        inset / card_h,
+        1.0 - inset / card_w,
+        1.0 - inset / card_h,
+    ]
 }
 
 const SCROLL_PATTERN_COUNT: usize = 8;
@@ -1383,20 +1397,24 @@ fn card_vertices(
     let y1 = 1.0 - (y + h) / screen_h * 2.0;
     let image_aspect = photo.width as f32 / photo.height as f32;
     let box_aspect = w / h;
+    let radius_px = card_corner_radius(screen_w, screen_h, w, h);
     let (arch_height, mask_bits) = match mask {
         PhotoMask::None => (0.0, 0.0),
         PhotoMask::Arch => (w / (2.0 * h), 0.0),
         PhotoMask::LargeCorners(corners) => (0.0, f32::from(corners)),
         PhotoMask::Polaroid => (0.0, f32::from(POLAROID)),
+        PhotoMask::Stamp(color) => (0.0, f32::from(STAMP) + f32::from(color) * 256.0),
     };
-    let [photo_left, photo_top, photo_right, photo_bottom] = polaroid_photo_bounds(box_aspect);
+    let photo_bounds = match mask {
+        PhotoMask::Polaroid => Some(polaroid_photo_bounds(box_aspect)),
+        PhotoMask::Stamp(_) => Some(stamp_photo_bounds(w, h, radius_px)),
+        _ => None,
+    };
+    let [photo_left, photo_top, photo_right, photo_bottom] =
+        photo_bounds.unwrap_or([0.0, 0.0, 1.0, 1.0]);
     let photo_width = photo_right - photo_left;
     let photo_height = photo_bottom - photo_top;
-    let photo_aspect = if mask == PhotoMask::Polaroid {
-        box_aspect * photo_width / photo_height
-    } else {
-        box_aspect
-    };
+    let photo_aspect = box_aspect * photo_width / photo_height;
     let (mut u0, mut u1, mut v0, mut v1) = if image_aspect > photo_aspect {
         let span = photo_aspect / image_aspect;
         ((1.0 - span) / 2.0, (1.0 + span) / 2.0, 0.0, 1.0)
@@ -1404,7 +1422,7 @@ fn card_vertices(
         let span = image_aspect / photo_aspect;
         (0.0, 1.0, (1.0 - span) / 2.0, (1.0 + span) / 2.0)
     };
-    if mask == PhotoMask::Polaroid {
+    if photo_bounds.is_some() {
         let u_span = u1 - u0;
         let v_span = v1 - v0;
         u1 = u0 + (1.0 - photo_left) / photo_width * u_span;
@@ -1420,7 +1438,7 @@ fn card_vertices(
         arch_height,
         card_aspect: box_aspect,
         mask_bits,
-        corner_radius: card_corner_radius(screen_w, screen_h, w, h) / h,
+        corner_radius: radius_px / h,
     };
     [
         vertex(x0, y0, u0, v0, 0.0, 0.0),
@@ -1673,6 +1691,23 @@ mod tests {
     }
 
     #[test]
+    fn stamp_has_even_paper_margins_in_both_orientations() {
+        for (width, height) in [(460.0, 688.0), (620.0, 328.0)] {
+            let radius = card_corner_radius(1280.0, 800.0, width, height);
+            let [left, top, right, bottom] = stamp_photo_bounds(width, height, radius);
+            let inset = radius * 0.55;
+            for margin in [
+                left * width,
+                top * height,
+                (1.0 - right) * width,
+                (1.0 - bottom) * height,
+            ] {
+                assert!((margin - inset).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
     fn arch_selects_vertical_scroll_cards() {
         let (_, horizontal_cards) = scroll_layout(4, 1.6, 1280.0, 800.0);
         let (_, portrait_cards) = scroll_layout(3, 0.7, 1280.0, 800.0);
@@ -1701,6 +1736,10 @@ mod tests {
             ),
             PhotoMask::LargeCorners(TOP_LEFT | BOTTOM_RIGHT)
         );
+        assert_eq!(
+            visible_mask(PhotoMask::Stamp(0), &horizontal_cards[0]),
+            PhotoMask::Stamp(0)
+        );
     }
 
     #[test]
@@ -1712,6 +1751,9 @@ mod tests {
         assert!(masks.contains(&PhotoMask::None));
         assert!(masks.contains(&PhotoMask::Arch));
         assert!(masks.contains(&PhotoMask::Polaroid));
+        for color in 0..STAMP_COLOR_COUNT {
+            assert!(masks.contains(&PhotoMask::Stamp(color)));
+        }
         assert!(masks.contains(&PhotoMask::LargeCorners(TOP_LEFT | BOTTOM_RIGHT)));
         assert!(masks.contains(&PhotoMask::LargeCorners(TOP_RIGHT | BOTTOM_LEFT)));
         assert!(masks.contains(&PhotoMask::LargeCorners(
