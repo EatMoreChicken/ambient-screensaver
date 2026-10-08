@@ -3,6 +3,7 @@ mod fonts;
 mod gnome;
 mod photos;
 mod polaroid;
+mod shapes;
 
 use chrono::{DateTime, Local, NaiveDate};
 use image::{metadata::Orientation, DynamicImage, ImageDecoder, ImageReader};
@@ -316,6 +317,11 @@ struct Photo {
     date_label: Option<Box<Photo>>,
     bind_group: wgpu::BindGroup,
     _texture: wgpu::Texture,
+}
+
+struct FloatingShape {
+    photo: Photo,
+    motion: shapes::Motion,
 }
 
 fn layout_mode(slide_number: u64, photo_count: usize) -> usize {
@@ -635,6 +641,8 @@ struct Renderer {
     clock_key: String,
     clock_screen_size: (u32, u32),
     photos: VecDeque<Photo>,
+    floating_shapes: Vec<FloatingShape>,
+    shapes_last_tick: Instant,
     receiver: mpsc::Receiver<DecodedPhoto>,
     slide_started: Instant,
     startup_fade_started: Option<Instant>,
@@ -755,11 +763,11 @@ impl Renderer {
         });
         let vertices = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("card vertices"),
-            size: (6 * 21 * std::mem::size_of::<Vertex>()) as u64,
+            size: (6 * 64 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Ok(Self {
+        let mut renderer = Self {
             surface,
             device,
             queue,
@@ -776,6 +784,8 @@ impl Renderer {
             clock_key: String::new(),
             clock_screen_size: (0, 0),
             photos: VecDeque::new(),
+            floating_shapes: Vec::new(),
+            shapes_last_tick: Instant::now(),
             receiver,
             slide_started: Instant::now(),
             startup_fade_started: None,
@@ -793,7 +803,62 @@ impl Renderer {
             scroll_patterns: VecDeque::new(),
             scroll_history: VecDeque::new(),
             layout_bag: LayoutBag::new(photo_count),
-        })
+        };
+        renderer.init_shapes();
+        Ok(renderer)
+    }
+
+    fn init_shapes(&mut self) {
+        let mut rng = rand::thread_rng();
+        let mut kinds = shapes::ShapeKind::ALL;
+        kinds.shuffle(&mut rng);
+        let mut colors = shapes::PASTELS;
+        colors.shuffle(&mut rng);
+        let mut layers = [
+            shapes::Layer::BehindPhotos,
+            shapes::Layer::BehindPhotos,
+            shapes::Layer::OverPhotos,
+            shapes::Layer::OverPhotos,
+            shapes::Layer::OverPhotos,
+            shapes::Layer::OverPhotos,
+        ];
+        layers.shuffle(&mut rng);
+        assert_eq!(layers.len(), shapes::FLOATING_SHAPE_COUNT);
+        for index in 0..shapes::FLOATING_SHAPE_COUNT {
+            let pixels = shapes::rasterize(kinds[index % kinds.len()], colors[index]);
+            let photo = self.upload(
+                DecodedPhoto {
+                    width: shapes::SPRITE_SIZE,
+                    height: shapes::SPRITE_SIZE,
+                    pixels,
+                    date: None,
+                },
+                PhotoMask::None,
+            );
+            self.floating_shapes.push(FloatingShape {
+                photo,
+                motion: shapes::Motion::new(&mut rng, index, layers[index]),
+            });
+        }
+    }
+
+    fn update_shapes(&mut self) {
+        let now = Instant::now();
+        let delta = now
+            .duration_since(self.shapes_last_tick)
+            .as_secs_f32()
+            .min(0.1);
+        self.shapes_last_tick = now;
+        let mut rng = rand::thread_rng();
+        for shape in &mut self.floating_shapes {
+            shape.motion.advance(delta);
+            if shape
+                .motion
+                .offscreen(self.config.width as f32, self.config.height as f32)
+            {
+                shape.motion = shapes::Motion::respawn(&mut rng);
+            }
+        }
     }
 
     fn upload(&self, decoded: DecodedPhoto, mask: PhotoMask) -> Photo {
@@ -920,6 +985,7 @@ impl Renderer {
             Style::Scroll => self.update_scroll(),
             Style::Slides => self.update_slides(),
         }
+        self.update_shapes();
         let first_scene_ready = match self.style {
             Style::Scroll => self.scroll_head_x.is_some(),
             Style::Slides => self.photos.len() >= layout_photo_count(0),
@@ -1204,10 +1270,17 @@ impl Renderer {
         for (_, _, alpha) in &mut cards {
             *alpha *= startup_alpha;
         }
-        if let Some(photo) = &self.clock_photo {
-            cards.push((photo, self.clock_rect, 1.0));
+        let mut draws = Vec::with_capacity(64);
+        for shape in self
+            .floating_shapes
+            .iter()
+            .filter(|shape| shape.motion.layer == shapes::Layer::BehindPhotos)
+        {
+            draws.push((
+                &shape.photo,
+                floating_shape_vertices(shape, width, height, startup_alpha),
+            ));
         }
-        let mut draws = Vec::with_capacity(21);
         for (photo, rect, alpha) in &cards {
             let mask = if self.style == Style::Scroll {
                 visible_mask(photo.mask, rect)
@@ -1226,6 +1299,22 @@ impl Renderer {
                     ));
                 }
             }
+        }
+        for shape in self
+            .floating_shapes
+            .iter()
+            .filter(|shape| shape.motion.layer == shapes::Layer::OverPhotos)
+        {
+            draws.push((
+                &shape.photo,
+                floating_shape_vertices(shape, width, height, startup_alpha),
+            ));
+        }
+        if let Some(photo) = &self.clock_photo {
+            draws.push((
+                photo,
+                card_vertices(&self.clock_rect, 1.0, PhotoMask::None, photo, width, height),
+            ));
         }
         let stride = (6 * std::mem::size_of::<Vertex>()) as u64;
         for (index, (_, vertices)) in draws.iter().enumerate() {
@@ -1359,10 +1448,27 @@ fn polaroid_date_vertices(
         label_height,
     ];
     let mut vertices = card_vertices(&rect, alpha, PhotoMask::None, label, screen_w, screen_h);
+    rotate_vertices(
+        &mut vertices,
+        &rect,
+        (-7.0_f32).to_radians(),
+        screen_w,
+        screen_h,
+    );
+    vertices
+}
+
+fn rotate_vertices(
+    vertices: &mut [Vertex; 6],
+    rect: &[f32; 4],
+    angle: f32,
+    screen_w: f32,
+    screen_h: f32,
+) {
     let center_x = rect[0] + rect[2] / 2.0;
     let center_y = rect[1] + rect[3] / 2.0;
-    let (sin, cos) = (-7.0_f32).to_radians().sin_cos();
-    for vertex in &mut vertices {
+    let (sin, cos) = angle.sin_cos();
+    for vertex in vertices.iter_mut() {
         let x = (vertex.position[0] + 1.0) * screen_w / 2.0 - center_x;
         let y = (1.0 - vertex.position[1]) * screen_h / 2.0 - center_y;
         let rotated_x = center_x + x * cos - y * sin;
@@ -1372,6 +1478,27 @@ fn polaroid_date_vertices(
             1.0 - rotated_y / screen_h * 2.0,
         ];
     }
+}
+
+fn floating_shape_vertices(
+    shape: &FloatingShape,
+    screen_w: f32,
+    screen_h: f32,
+    startup_alpha: f32,
+) -> [Vertex; 6] {
+    let rect = shape.motion.rect(screen_w, screen_h);
+    let mut vertices = card_vertices(
+        &rect,
+        shape.motion.opacity * startup_alpha,
+        PhotoMask::None,
+        &shape.photo,
+        screen_w,
+        screen_h,
+    );
+    for vertex in &mut vertices {
+        vertex.corner_radius = 0.0;
+    }
+    rotate_vertices(&mut vertices, &rect, shape.motion.angle, screen_w, screen_h);
     vertices
 }
 
