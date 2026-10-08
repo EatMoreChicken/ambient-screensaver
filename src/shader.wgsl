@@ -71,6 +71,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let p = vec2<f32>(input.card_uv.x * aspect, input.card_uv.y);
     let short_side = min(aspect, 1.0);
     let corners = u32(input.mask_bits);
+    if (corners & 128u) != 0u {
+        let spread = input.corner_radius * 0.22;
+        let distance = rounded_rect_distance(
+            p,
+            vec2<f32>(aspect * 0.5, 0.5 + spread * 0.24),
+            vec2<f32>(aspect * 0.5 - spread, 0.5 - spread),
+            input.corner_radius
+        );
+        let opacity = 1.0 - smoothstep(-spread * 0.9, spread * 0.9, distance);
+        return vec4<f32>(vec3<f32>(0.24, 0.19, 0.16), input.alpha * opacity * 0.18);
+    }
     let right = p.x >= aspect * 0.5;
     let bottom = p.y >= 0.5;
     let corner = select(select(1u, 2u, right), select(8u, 4u, right), bottom);

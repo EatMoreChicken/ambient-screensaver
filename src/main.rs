@@ -46,6 +46,7 @@ const BOTTOM_RIGHT: u8 = 4;
 const BOTTOM_LEFT: u8 = 8;
 const POLAROID: u8 = 32;
 const STAMP: u8 = 64;
+const PAPER_SHADOW: u8 = 128;
 const STAMP_COLOR_COUNT: u8 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -55,6 +56,24 @@ enum PhotoMask {
     LargeCorners(u8),
     Polaroid,
     Stamp(u8),
+    PaperShadow,
+}
+
+fn is_paper_mask(mask: PhotoMask) -> bool {
+    matches!(mask, PhotoMask::Polaroid | PhotoMask::Stamp(_))
+}
+
+fn choose_photo_mask(rng: &mut impl Rng, quiet: bool, paper_cooldown: usize) -> PhotoMask {
+    let mask = if quiet && rng.gen_bool(0.5) {
+        PhotoMask::None
+    } else {
+        random_photo_mask(rng)
+    };
+    if paper_cooldown > 0 && is_paper_mask(mask) {
+        PhotoMask::None
+    } else {
+        mask
+    }
 }
 
 fn random_photo_mask(rng: &mut impl Rng) -> PhotoMask {
@@ -127,6 +146,8 @@ struct Settings {
     background_color: [u8; 3],
     style: Style,
     windowed: bool,
+    quiet: bool,
+    no_shapes: bool,
 }
 
 fn parse_background_color(value: &str) -> Result<[u8; 3], String> {
@@ -171,16 +192,20 @@ fn settings() -> Result<Settings, String> {
         background_color: [0xF5, 0xF0, 0xE6],
         style: Style::Scroll,
         windowed: false,
+        quiet: false,
+        no_shapes: false,
     };
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
-                println!("Usage: ambient-screensaver [--windowed] [--style scroll|slides] [--scroll-speed SCREENS_PER_MINUTE] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
+                println!("Usage: ambient-screensaver [--windowed] [--quiet] [--no-shapes] [--style scroll|slides] [--scroll-speed SCREENS_PER_MINUTE] [--duration SECONDS] [--transition SECONDS] [--background-color '#RRGGBB'] PHOTO_DIR [PHOTO_DIR ...]");
                 println!("GNOME setup: ambient-screensaver gnome install [--idle-seconds N] PHOTO_DIR [PHOTO_DIR ...]");
                 println!("Font licenses: ambient-screensaver --font-licenses");
                 std::process::exit(0);
             }
             "--windowed" => settings.windowed = true,
+            "--quiet" => settings.quiet = true,
+            "--no-shapes" => settings.no_shapes = true,
             "--style" => {
                 let value = args.next().ok_or("--style needs scroll or slides")?;
                 settings.style = parse_style(&value)?;
@@ -656,6 +681,9 @@ struct Renderer {
     clock_screen_size: (u32, u32),
     photos: VecDeque<Photo>,
     floating_shapes: Vec<FloatingShape>,
+    quiet: bool,
+    no_shapes: bool,
+    paper_cooldown: usize,
     shapes_last_tick: Instant,
     receiver: mpsc::Receiver<DecodedPhoto>,
     slide_started: Instant,
@@ -799,6 +827,9 @@ impl Renderer {
             clock_screen_size: (0, 0),
             photos: VecDeque::new(),
             floating_shapes: Vec::new(),
+            quiet: settings.quiet,
+            no_shapes: settings.no_shapes,
+            paper_cooldown: 0,
             shapes_last_tick: Instant::now(),
             receiver,
             slide_started: Instant::now(),
@@ -818,7 +849,9 @@ impl Renderer {
             scroll_history: VecDeque::new(),
             layout_bag: LayoutBag::new(photo_count),
         };
-        renderer.init_shapes();
+        if !renderer.no_shapes {
+            renderer.init_shapes();
+        }
         Ok(renderer)
     }
 
@@ -831,14 +864,19 @@ impl Renderer {
         let mut layers = [
             shapes::Layer::BehindPhotos,
             shapes::Layer::BehindPhotos,
-            shapes::Layer::OverPhotos,
-            shapes::Layer::OverPhotos,
+            shapes::Layer::BehindPhotos,
+            shapes::Layer::BehindPhotos,
             shapes::Layer::OverPhotos,
             shapes::Layer::OverPhotos,
         ];
         layers.shuffle(&mut rng);
         assert_eq!(layers.len(), shapes::FLOATING_SHAPE_COUNT);
-        for index in 0..shapes::FLOATING_SHAPE_COUNT {
+        let count = if self.quiet {
+            3
+        } else {
+            shapes::FLOATING_SHAPE_COUNT
+        };
+        for index in 0..count {
             let pixels = shapes::rasterize(kinds[index % kinds.len()], colors[index]);
             let photo = self.upload(
                 DecodedPhoto {
@@ -851,7 +889,16 @@ impl Renderer {
             );
             self.floating_shapes.push(FloatingShape {
                 photo,
-                motion: shapes::Motion::new(&mut rng, index, layers[index]),
+                motion: shapes::Motion::new(
+                    &mut rng,
+                    index,
+                    count,
+                    if self.quiet {
+                        shapes::Layer::BehindPhotos
+                    } else {
+                        layers[index]
+                    },
+                ),
             });
         }
     }
@@ -865,12 +912,18 @@ impl Renderer {
         self.shapes_last_tick = now;
         let mut rng = rand::thread_rng();
         for shape in &mut self.floating_shapes {
-            shape.motion.advance(delta);
+            shape
+                .motion
+                .advance(if self.quiet { delta * 0.5 } else { delta });
             if shape
                 .motion
                 .offscreen(self.config.width as f32, self.config.height as f32)
             {
-                shape.motion = shapes::Motion::respawn(&mut rng);
+                shape.motion = if self.quiet {
+                    shapes::Motion::respawn_behind(&mut rng)
+                } else {
+                    shapes::Motion::respawn(&mut rng)
+                };
             }
         }
     }
@@ -964,7 +1017,7 @@ impl Renderer {
                         self.slide_started = Instant::now();
                     }
                     let mut mask = if self.style == Style::Scroll {
-                        random_photo_mask(&mut rand::thread_rng())
+                        choose_photo_mask(&mut rand::thread_rng(), self.quiet, self.paper_cooldown)
                     } else {
                         PhotoMask::None
                     };
@@ -987,6 +1040,11 @@ impl Renderer {
                     if date_label.is_none() && mask == PhotoMask::Polaroid {
                         mask = PhotoMask::None;
                     }
+                    self.paper_cooldown = if is_paper_mask(mask) {
+                        3
+                    } else {
+                        self.paper_cooldown.saturating_sub(1)
+                    };
                     let mut photo = self.upload(decoded, mask);
                     photo.date_label = date_label;
                     self.photos.push_back(photo);
@@ -1301,6 +1359,12 @@ impl Renderer {
             } else {
                 PhotoMask::None
             };
+            if is_paper_mask(mask) {
+                draws.push((
+                    *photo,
+                    paper_shadow_vertices(rect, *alpha, photo, width, height),
+                ));
+            }
             draws.push((
                 *photo,
                 card_vertices(rect, *alpha, mask, photo, width, height),
@@ -1404,6 +1468,7 @@ fn card_vertices(
         PhotoMask::LargeCorners(corners) => (0.0, f32::from(corners)),
         PhotoMask::Polaroid => (0.0, f32::from(POLAROID)),
         PhotoMask::Stamp(color) => (0.0, f32::from(STAMP) + f32::from(color) * 256.0),
+        PhotoMask::PaperShadow => (0.0, f32::from(PAPER_SHADOW)),
     };
     let photo_bounds = match mask {
         PhotoMask::Polaroid => Some(polaroid_photo_bounds(box_aspect)),
@@ -1448,6 +1513,30 @@ fn card_vertices(
         vertex(x1, y1, u1, v1, 1.0, 1.0),
         vertex(x1, y0, u1, v0, 1.0, 0.0),
     ]
+}
+
+fn paper_shadow_vertices(
+    rect: &[f32; 4],
+    alpha: f32,
+    photo: &Photo,
+    screen_w: f32,
+    screen_h: f32,
+) -> [Vertex; 6] {
+    let spread = card_corner_radius(screen_w, screen_h, rect[2], rect[3]) * 0.22;
+    let shadow_rect = [
+        rect[0] - spread,
+        rect[1] - spread,
+        rect[2] + spread * 2.0,
+        rect[3] + spread * 2.0,
+    ];
+    card_vertices(
+        &shadow_rect,
+        alpha,
+        PhotoMask::PaperShadow,
+        photo,
+        screen_w,
+        screen_h,
+    )
 }
 
 fn polaroid_date_vertices(
@@ -1762,6 +1851,41 @@ mod tests {
         for corner in [TOP_LEFT, TOP_RIGHT, BOTTOM_RIGHT, BOTTOM_LEFT] {
             assert!(masks.contains(&PhotoMask::LargeCorners(corner)));
         }
+    }
+
+    #[test]
+    fn paper_frames_have_three_other_cards_between_them() {
+        use rand::SeedableRng;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(17);
+        let mut paper_cooldown: usize = 0;
+        let mut paper_count = 0;
+        for _ in 0..1000 {
+            let mask = choose_photo_mask(&mut rng, false, paper_cooldown);
+            assert!(!(paper_cooldown > 0 && is_paper_mask(mask)));
+            paper_cooldown = if is_paper_mask(mask) {
+                3
+            } else {
+                paper_cooldown.saturating_sub(1)
+            };
+            paper_count += usize::from(is_paper_mask(mask));
+        }
+        assert!(paper_count > 0);
+    }
+
+    #[test]
+    fn quiet_mode_reduces_special_frames() {
+        use rand::SeedableRng;
+
+        let mut normal = rand::rngs::StdRng::seed_from_u64(21);
+        let mut quiet = rand::rngs::StdRng::seed_from_u64(21);
+        let normal_count = (0..1000)
+            .filter(|_| choose_photo_mask(&mut normal, false, 0) != PhotoMask::None)
+            .count();
+        let quiet_count = (0..1000)
+            .filter(|_| choose_photo_mask(&mut quiet, true, 0) != PhotoMask::None)
+            .count();
+        assert!(quiet_count < normal_count);
     }
 
     #[test]

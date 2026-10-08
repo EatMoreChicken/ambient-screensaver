@@ -109,9 +109,9 @@ pub struct Motion {
 }
 
 impl Motion {
-    pub fn new(rng: &mut impl Rng, index: usize, layer: Layer) -> Self {
+    pub fn new(rng: &mut impl Rng, index: usize, count: usize, layer: Layer) -> Self {
         let mut motion = Self::with_layer(rng, layer);
-        motion.y = (index as f32 + rng.gen_range(0.0..1.0)) / FLOATING_SHAPE_COUNT as f32;
+        motion.y = (index as f32 + rng.gen_range(0.0..1.0)) / count as f32;
         motion
     }
 
@@ -122,6 +122,10 @@ impl Motion {
             Layer::OverPhotos
         };
         Self::with_layer(rng, layer)
+    }
+
+    pub fn respawn_behind(rng: &mut impl Rng) -> Self {
+        Self::with_layer(rng, Layer::BehindPhotos)
     }
 
     fn with_layer(rng: &mut impl Rng, layer: Layer) -> Self {
@@ -149,7 +153,7 @@ impl Motion {
             opacity: if behind {
                 rng.gen_range(0.52..0.7)
             } else {
-                rng.gen_range(0.38..0.58)
+                rng.gen_range(0.25..0.35)
             },
             layer,
         }
