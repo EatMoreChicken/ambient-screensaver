@@ -69,7 +69,7 @@ The local `photos/` folder is gitignored test data; replace it with any photo fo
 
 The default is a continuous rightward scroll at 1.25 screen widths per minute. Use `--scroll-speed 1` to slow it to one screen width per minute, `--background-color '#DCE8E0'` to change the cream mat, or `--style slides --duration 8 --transition 1.5` for the earlier slide layout. These display options currently work only for direct launches; GNOME setup saves photo folders and idle time.
 
-The app reads JPEG, PNG, WebP, GIF, BMP, and TIFF files recursively and corrects photo orientation. Scroll cards can have an arch, slash-cut corners, rounded corners, or a Polaroid frame. Polaroid dates use the photo's EXIF capture date when available, then the file's modified date. Videos are not supported. Fullscreen mode closes on keyboard, mouse, or pointer activity.
+The app reads JPEG, PNG, WebP, GIF, BMP, and TIFF files recursively and corrects photo orientation. Scroll cards can have an arch, slash-cut corners, rounded corners, or a Polaroid frame. Polaroid dates use the photo's EXIF capture date when available, then the file's modified date. Videos are not supported. In scroll mode, hold Left to move forward through photos, or hold Right to go back toward recent photos. Automatic scrolling resumes three seconds after you release the arrow key. Other keys, mouse clicks, mouse wheel movement, and pointer movement close the display.
 
 ## Fonts
 

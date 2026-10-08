@@ -16,8 +16,9 @@ use std::{
 };
 use winit::{
     dpi::PhysicalSize,
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
+    keyboard::{Key, NamedKey},
     window::{Fullscreen, Window, WindowBuilder},
 };
 
@@ -354,6 +355,31 @@ struct ScrollGroup {
     rects: Vec<[f32; 4]>,
 }
 
+struct ScrollHistoryGroup {
+    pattern: usize,
+    photos: Vec<Photo>,
+}
+
+const SCROLL_PAUSE: Duration = Duration::from_secs(3);
+const SCROLL_HISTORY_PHOTOS: usize = 8;
+const SCROLL_KEY_SPEED: f32 = 0.65;
+
+fn scroll_motion(
+    delta: f32,
+    width: f32,
+    duration: f32,
+    left_held: bool,
+    right_held: bool,
+    paused: bool,
+) -> f32 {
+    match (left_held, right_held) {
+        (true, false) => delta * width * SCROLL_KEY_SPEED,
+        (false, true) => -delta * width * SCROLL_KEY_SPEED,
+        _ if paused => 0.0,
+        _ => delta * width / duration,
+    }
+}
+
 fn scroll_group_lefts(head_x: f32, groups: &[ScrollGroup], gap: f32) -> Vec<f32> {
     let mut x = head_x;
     groups
@@ -601,7 +627,11 @@ struct Renderer {
     style: Style,
     scroll_head_x: Option<f32>,
     scroll_last_tick: Instant,
+    scroll_pause_until: Option<Instant>,
+    scroll_left_held: bool,
+    scroll_right_held: bool,
     scroll_patterns: VecDeque<usize>,
+    scroll_history: VecDeque<ScrollHistoryGroup>,
     layout_bag: LayoutBag,
 }
 
@@ -738,7 +768,11 @@ impl Renderer {
             style: settings.style,
             scroll_head_x: None,
             scroll_last_tick: Instant::now(),
+            scroll_pause_until: None,
+            scroll_left_held: false,
+            scroll_right_held: false,
             scroll_patterns: VecDeque::new(),
+            scroll_history: VecDeque::new(),
             layout_bag: LayoutBag::new(photo_count),
         })
     }
@@ -883,44 +917,125 @@ impl Renderer {
             .as_secs_f32()
             .min(0.1);
         self.scroll_last_tick = now;
+        let arrow_held = self.scroll_left_held || self.scroll_right_held;
+        let paused = arrow_held || self.scroll_pause_until.is_some_and(|until| now < until);
         let width = self.config.width as f32;
         let groups = self.scroll_groups(width, self.config.height as f32);
         if groups.len() < 2 {
             return;
         }
         let gap = width * 0.018;
-        let head_x = match self.scroll_head_x {
-            Some(x) => x,
-            None => {
-                let x = width - groups[0].width;
-                if scroll_group_lefts(x, &groups, gap)
-                    .last()
-                    .copied()
-                    .unwrap_or(width)
-                    > 0.0
-                {
-                    return;
-                }
-                self.scroll_head_x = Some(x);
-                x
+        if self.scroll_head_x.is_none() {
+            let x = width - groups[0].width;
+            if scroll_group_lefts(x, &groups, gap)
+                .last()
+                .copied()
+                .unwrap_or(width)
+                > 0.0
+            {
+                return;
             }
+            self.scroll_head_x = Some(x);
+        }
+        let motion = scroll_motion(
+            delta,
+            width,
+            self.duration.as_secs_f32(),
+            self.scroll_left_held,
+            self.scroll_right_held,
+            paused,
+        );
+        if motion < 0.0 {
+            self.rewind_scroll(-motion);
+        } else if motion > 0.0 {
+            self.advance_scroll(motion);
+        }
+    }
+
+    fn set_scroll_arrow(&mut self, key: NamedKey, pressed: bool) {
+        self.scroll_pause_until = Some(Instant::now() + SCROLL_PAUSE);
+        match key {
+            NamedKey::ArrowLeft => self.scroll_left_held = pressed,
+            NamedKey::ArrowRight => self.scroll_right_held = pressed,
+            _ => unreachable!("only arrow keys move the scroll"),
+        }
+    }
+
+    fn release_scroll_arrows(&mut self) {
+        if self.scroll_left_held || self.scroll_right_held {
+            self.scroll_pause_until = Some(Instant::now() + SCROLL_PAUSE);
+            self.scroll_left_held = false;
+            self.scroll_right_held = false;
+        }
+    }
+
+    fn advance_scroll(&mut self, distance: f32) {
+        let width = self.config.width as f32;
+        let groups = self.scroll_groups(width, self.config.height as f32);
+        let Some(head_x) = self.scroll_head_x else {
+            return;
         };
+        if groups.len() < 2 {
+            return;
+        }
+        let gap = width * 0.018;
         let leftmost = scroll_group_lefts(head_x, &groups, gap)
             .last()
             .copied()
             .unwrap_or(0.0);
-        let distance = (delta * width / self.duration.as_secs_f32()).min((-leftmost).max(0.0));
-        let new_head_x = head_x + distance;
-        if new_head_x >= width {
-            let current_pattern = self.scroll_patterns.pop_front().unwrap();
-            for _ in 0..scroll_pattern_photo_count(current_pattern) {
-                self.photos.pop_front();
+        let mut new_head_x = head_x + distance.min((-leftmost).max(0.0));
+        let mut group_index = 0;
+        while group_index + 1 < groups.len() && new_head_x >= width {
+            let pattern = self.scroll_patterns.pop_front().unwrap();
+            let photos = (0..scroll_pattern_photo_count(pattern))
+                .map(|_| self.photos.pop_front().unwrap())
+                .collect();
+            self.scroll_history
+                .push_back(ScrollHistoryGroup { pattern, photos });
+            while self.scroll_history.len() > 1
+                && self
+                    .scroll_history
+                    .iter()
+                    .map(|group| group.photos.len())
+                    .sum::<usize>()
+                    > SCROLL_HISTORY_PHOTOS
+            {
+                self.scroll_history.pop_front();
             }
             self.slide_number += 1;
-            self.scroll_head_x = Some(new_head_x - gap - groups[1].width);
-        } else {
-            self.scroll_head_x = Some(new_head_x);
+            group_index += 1;
+            new_head_x -= gap + groups[group_index].width;
         }
+        self.scroll_head_x = Some(new_head_x);
+    }
+
+    fn rewind_scroll(&mut self, distance: f32) {
+        let width = self.config.width as f32;
+        let height = self.config.height as f32;
+        let Some(mut head_x) = self.scroll_head_x.map(|x| x - distance) else {
+            return;
+        };
+        let gap = width * 0.018;
+        loop {
+            let groups = self.scroll_groups(width, height);
+            let Some(first) = groups.first() else {
+                return;
+            };
+            if head_x + first.width >= width {
+                break;
+            }
+            let Some(mut previous) = self.scroll_history.pop_back() else {
+                head_x = width - first.width;
+                break;
+            };
+            head_x += gap + first.width;
+            self.scroll_patterns.push_front(previous.pattern);
+            while let Some(photo) = previous.photos.pop() {
+                self.photos.push_front(photo);
+            }
+            self.slide_number = self.slide_number.saturating_sub(1);
+        }
+        self.scroll_head_x = Some(head_x);
     }
 
     fn scroll_groups(&self, width: f32, height: f32) -> Vec<ScrollGroup> {
@@ -1269,15 +1384,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ))?;
     let mut last_cursor_position: Option<(f64, f64)> = None;
     event_loop.run(move |event, event_loop| {
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(33),
-        ));
+        let frame_interval = if renderer.scroll_left_held || renderer.scroll_right_held {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(33)
+        };
+        event_loop.set_control_flow(ControlFlow::WaitUntil(Instant::now() + frame_interval));
         match event {
             Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
                 WindowEvent::CloseRequested
-                | WindowEvent::KeyboardInput { .. }
                 | WindowEvent::MouseInput { .. }
                 | WindowEvent::MouseWheel { .. } => event_loop.exit(),
+                WindowEvent::KeyboardInput { event, .. } => match event.logical_key {
+                    Key::Named(key @ (NamedKey::ArrowLeft | NamedKey::ArrowRight))
+                        if renderer.style == Style::Scroll =>
+                    {
+                        renderer.set_scroll_arrow(key, event.state == ElementState::Pressed);
+                    }
+                    _ => event_loop.exit(),
+                },
+                WindowEvent::Focused(false) => renderer.release_scroll_arrows(),
                 WindowEvent::CursorMoved { position, .. } => {
                     if let Some((x, y)) = last_cursor_position {
                         let dx = position.x - x;
@@ -1492,6 +1618,21 @@ mod tests {
         assert!((before[1] + pair_width + gap - before[0]).abs() < 0.001);
         let after = scroll_group_lefts(before[1], &groups[1..], gap);
         assert_eq!(after[0], before[1]);
+    }
+
+    #[test]
+    fn held_arrows_move_by_elapsed_time_and_release_pauses_scroll() {
+        let left = scroll_motion(0.016, 1280.0, 48.0, true, false, true);
+        let right = scroll_motion(0.016, 1280.0, 48.0, false, true, true);
+        assert!(left > 0.0);
+        assert_eq!(right, -left);
+        assert_eq!(
+            scroll_motion(0.032, 1280.0, 48.0, false, true, true),
+            right * 2.0
+        );
+        assert_eq!(scroll_motion(0.016, 1280.0, 48.0, false, false, true), 0.0);
+        assert_eq!(scroll_motion(0.016, 1280.0, 48.0, true, true, true), 0.0);
+        assert!(scroll_motion(0.016, 1280.0, 48.0, false, false, false) > 0.0);
     }
 
     #[test]
